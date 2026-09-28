@@ -1,27 +1,90 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
 
-// safeMediaFilename reduces a sender-provided filename to a safe base name.
-// TODO(#3): not implemented yet.
+// safeMediaFilename reduces a sender-provided filename to its last path
+// element, treating both / and \ as separators. It reports false for names
+// that are empty, ".", "..", a bare separator or contain NUL.
 func safeMediaFilename(name string) (string, bool) {
-	return name, name != ""
+	if strings.ContainsRune(name, 0) {
+		return "", false
+	}
+	base := path.Base(strings.ReplaceAll(name, `\`, "/"))
+	switch base {
+	case "", ".", "..", "/":
+		return "", false
+	}
+	if strings.ContainsAny(base, `/\`) {
+		return "", false
+	}
+	return base, true
 }
 
-// mediaLocalPath returns where media for chatJID/filename is saved under
-// storeDir. TODO(#3): not implemented yet (mirrors the old unsafe logic and
-// does not create directories).
+// chatDirName turns a chat JID into a single directory name ("@" and "." are
+// kept, ":" becomes "_") and rejects anything that isn't one plain element.
+func chatDirName(chatJID string) (string, error) {
+	name := strings.ReplaceAll(chatJID, ":", "_")
+	switch {
+	case name == "", name == ".", name == "..":
+		return "", fmt.Errorf("invalid chat JID %q", chatJID)
+	case strings.ContainsAny(name, `/\`), strings.ContainsRune(name, 0):
+		return "", fmt.Errorf("invalid chat JID %q", chatJID)
+	}
+	return name, nil
+}
+
+// mediaLocalPath returns the absolute path media for chatJID/filename is
+// saved at: <storeDir>/<chat>/<base name>, with storeDir's symlinks resolved.
+// It creates the chat dir (0700) and refuses paths that would leave the
+// store, a chat dir that is a symlink, or an existing file that is a symlink.
 func mediaLocalPath(storeDir, chatJID, filename string) (string, error) {
-	chatDir := fmt.Sprintf("%s/%s", storeDir, strings.ReplaceAll(chatJID, ":", "_"))
-	return filepath.Abs(fmt.Sprintf("%s/%s", chatDir, filename))
+	chat, err := chatDirName(chatJID)
+	if err != nil {
+		return "", err
+	}
+	name, ok := safeMediaFilename(filename)
+	if !ok {
+		return "", fmt.Errorf("invalid media filename %q", filename)
+	}
+	storeReal, err := resolveDir(storeDir)
+	if err != nil {
+		return "", fmt.Errorf("store dir: %w", err)
+	}
+
+	chatDir := filepath.Join(storeReal, chat)
+	if err := os.MkdirAll(chatDir, 0o700); err != nil {
+		return "", fmt.Errorf("create chat directory: %w", err)
+	}
+	if real, err := filepath.EvalSymlinks(chatDir); err != nil || real != chatDir {
+		return "", fmt.Errorf("chat directory %s is not a plain directory inside the store", chatDir)
+	}
+	if err := os.Chmod(chatDir, 0o700); err != nil {
+		return "", fmt.Errorf("restrict chat directory: %w", err)
+	}
+
+	p := filepath.Join(chatDir, name)
+	if rel, err := filepath.Rel(storeReal, p); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("media path %s escapes the store", p)
+	}
+	if info, err := os.Lstat(p); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("media path %s is a symlink", p)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	return p, nil
 }
 
-// saveMediaFile writes downloaded media. TODO(#3): not implemented yet.
+// saveMediaFile writes downloaded media readable by the owner only.
 func saveMediaFile(path string, data []byte) error {
-	return os.WriteFile(path, data, 0644)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }

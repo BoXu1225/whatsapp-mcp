@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"google.golang.org/protobuf/proto"
@@ -165,5 +166,53 @@ func TestExtractMediaInfoSanitisesDocumentFilename(t *testing.T) {
 				t.Errorf("filename = %q, want prefix %q", filename, tt.wantPrefix)
 			}
 		})
+	}
+}
+
+func TestDownloadMediaUsesSafePathForStoredFilename(t *testing.T) {
+	store := newTestStore(t)
+	chat := "15550000001@s.whatsapp.net"
+	ts := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	if err := store.StoreChat(chat, "Test Contact", ts); err != nil {
+		t.Fatal(err)
+	}
+	// A row stored before filenames were sanitised.
+	if err := store.StoreMessage("m1", chat, "15550000001", "", ts, false, "document", "../../evil.txt", "", nil, nil, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	// Cached copy at the safe location, so downloadMedia never needs a client.
+	chatDir := filepath.Join(store.dir, chat)
+	if err := os.MkdirAll(chatDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(chatDir, "evil.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, _, filename, got, err := downloadMedia(nil, store, "m1", chat)
+	if !ok || err != nil {
+		t.Fatalf("downloadMedia: ok=%v err=%v", ok, err)
+	}
+	realStore, _ := filepath.EvalSymlinks(store.dir)
+	if filename != "evil.txt" || got != filepath.Join(realStore, chat, "evil.txt") {
+		t.Errorf("got filename %q path %q, want evil.txt under the chat dir", filename, got)
+	}
+}
+
+func TestDownloadMediaRejectsTraversalChatJID(t *testing.T) {
+	store := newTestStore(t)
+	chat := "../outside"
+	ts := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	if err := store.StoreChat(chat, "x", ts); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StoreMessage("m1", chat, "15550000001", "", ts, false, "image", "image_1.jpg", "", nil, nil, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _, _, _, err := downloadMedia(nil, store, "m1", chat); ok || err == nil {
+		t.Fatalf("downloadMedia with chat %q succeeded", chat)
+	}
+	if _, err := os.Stat(filepath.Join(store.dir, "..", "outside")); !os.IsNotExist(err) {
+		t.Errorf("directory created outside the store (stat err %v)", err)
 	}
 }

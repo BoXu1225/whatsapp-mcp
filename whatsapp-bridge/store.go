@@ -19,7 +19,8 @@ type Message struct {
 
 // Database handler for storing message history
 type MessageStore struct {
-	db *sql.DB
+	db  *sql.DB
+	dir string // store directory; downloaded media is saved under it
 }
 
 // Initialize message store
@@ -71,7 +72,7 @@ func NewMessageStoreAt(dir string) (*MessageStore, error) {
 		return nil, fmt.Errorf("failed to create tables: %v", err)
 	}
 
-	return &MessageStore{db: db}, nil
+	return &MessageStore{db: db, dir: dir}, nil
 }
 
 // Close the database connection
