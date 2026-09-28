@@ -103,6 +103,12 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 		return true, mediaType, filename, absPath, nil
 	}
 
+	// A chat merged into its LID chat keeps media downloaded earlier in the
+	// old phone-JID folder.
+	if p, ok := mergedChatMediaPath(messageStore, chatJID, filename); ok {
+		return true, mediaType, filepath.Base(p), p, nil
+	}
+
 	// If we don't have all the media info we need, we can't download
 	if url == "" || len(mediaKey) == 0 || len(fileSHA256) == 0 || len(fileEncSHA256) == 0 || fileLength == 0 {
 		return false, "", "", "", fmt.Errorf("incomplete media information for download")
@@ -328,4 +334,52 @@ func placeholderWaveform(duration uint32) []byte {
 	}
 
 	return waveform
+}
+
+// mergedChatMediaPath looks for an already-downloaded file in the phone-JID
+// folder a LID chat had before it was merged (store/<pn>@s.whatsapp.net/).
+// The phone JID comes from the other person's sender_alt in that chat. Only
+// existing plain folders are considered, and paths get mediaLocalPath's checks.
+func mergedChatMediaPath(messageStore *MessageStore, chatJID, filename string) (string, bool) {
+	if !strings.HasSuffix(chatJID, "@lid") {
+		return "", false
+	}
+	rows, err := messageStore.db.Query(
+		`SELECT DISTINCT sender_alt FROM messages
+		WHERE chat_jid = ? AND sender = ? AND COALESCE(is_from_me, 0) = 0 AND sender_alt LIKE '%@s.whatsapp.net'`,
+		chatJID, chatJID,
+	)
+	if err != nil {
+		return "", false
+	}
+	var alts []string
+	for rows.Next() {
+		var alt string
+		if rows.Scan(&alt) == nil {
+			alts = append(alts, alt)
+		}
+	}
+	rows.Close()
+
+	storeReal, err := resolveDir(messageStore.dir)
+	if err != nil {
+		return "", false
+	}
+	for _, alt := range alts {
+		dir, err := chatDirName(alt)
+		if err != nil {
+			continue
+		}
+		if info, err := os.Lstat(filepath.Join(storeReal, dir)); err != nil || !info.IsDir() {
+			continue
+		}
+		p, err := mediaLocalPath(messageStore.dir, alt, filename)
+		if err != nil {
+			continue
+		}
+		if info, err := os.Lstat(p); err == nil && info.Mode().IsRegular() {
+			return p, true
+		}
+	}
+	return "", false
 }
