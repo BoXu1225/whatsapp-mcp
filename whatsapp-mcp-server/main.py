@@ -11,6 +11,7 @@ from whatsapp import (
     get_direct_chat_by_contact as whatsapp_get_direct_chat_by_contact,
     get_last_interaction as whatsapp_get_last_interaction,
     get_message_context as whatsapp_get_message_context,
+    list_awaiting_reply as whatsapp_list_awaiting_reply,
     list_chats as whatsapp_list_chats,
     list_messages as whatsapp_list_messages,
     load_directory,
@@ -53,13 +54,15 @@ def list_messages(
     page: int = 0,
     include_context: Optional[bool] = None,
     context_before: int = 1,
-    context_after: int = 1
+    context_after: int = 1,
+    media_only: bool = False,
+    media_type: Optional[str] = None,
 ) -> str:
     """Get WhatsApp messages matching specified criteria with optional context.
 
     Output is one line per message, oldest first, each message once:
       [time] Chat: <name> (<chat JID>) | ID: <message ID> | From: <sender name or Me>: <text>
-    Media messages start with a [type] tag; pass the ID and chat JID to download_media.
+    Media messages start with a [type] or [type: filename] tag; pass the ID and chat JID to download_media.
     limit/page select the newest matches (page 0 = most recent), printed oldest to newest.
     With context, lines starting with '>>' are the matches and the others are context.
     
@@ -75,6 +78,8 @@ def list_messages(
             Default: False when chat_jid is set (read a thread in order), True otherwise.
         context_before: Number of messages to include before each match (default 1)
         context_after: Number of messages to include after each match (default 1)
+        media_only: Only return media messages (images, videos, audio, documents, stickers)
+        media_type: Only return media of this type, e.g. "image", "video", "audio", "document"
     """
     messages = whatsapp_list_messages(
         after=after,
@@ -86,7 +91,9 @@ def list_messages(
         page=page,
         include_context=include_context,
         context_before=context_before,
-        context_after=context_after
+        context_after=context_after,
+        media_only=media_only,
+        media_type=media_type,
     )
     return messages
 
@@ -118,6 +125,24 @@ def list_chats(
         sort_by=sort_by
     )
     return chats
+
+@mcp.tool()
+def list_awaiting_reply(
+    since: Optional[str] = None,
+    include_groups: bool = False,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """List chats waiting for the user's reply: the newest message is not from the user. Newest first.
+
+    Each result has jid, name, last_message (preview; media as [type: filename]),
+    last_message_id, last_message_at, last_sender and last_sender_name.
+
+    Args:
+        since: Optional ISO-8601 datetime; only chats whose last message is at or after it
+        include_groups: Also include group chats (default False: direct chats only)
+        limit: Maximum number of chats to return (default 20)
+    """
+    return whatsapp_list_awaiting_reply(since=since, include_groups=include_groups, limit=limit)
 
 @mcp.tool()
 def get_chat(chat_jid: str, include_last_message: bool = True) -> Dict[str, Any]:
