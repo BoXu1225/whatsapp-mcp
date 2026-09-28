@@ -83,8 +83,10 @@ func storeHistorySyncWith(messageStore *MessageStore, id Identity, parse webPars
 		if ts := conversation.GetConversationTimestamp(); ts != 0 {
 			conv.convTime = time.Unix(int64(ts), 0)
 		}
-		for _, hm := range conversation.Messages {
-			webMsg := hm.GetMessage()
+		// History lists messages newest first: walk it backwards, then sort
+		// (stably) by time, so the batch is stored oldest first.
+		for i := len(conversation.Messages) - 1; i >= 0; i-- {
+			webMsg := conversation.Messages[i].GetMessage()
 			if webMsg == nil || webMsg.GetMessageTimestamp() == 0 {
 				continue
 			}
@@ -95,7 +97,6 @@ func storeHistorySyncWith(messageStore *MessageStore, id Identity, parse webPars
 			}
 			conv.msgs = append(conv.msgs, evt)
 		}
-		// History lists messages newest first; store oldest first.
 		sort.SliceStable(conv.msgs, func(i, j int) bool {
 			return conv.msgs[i].Info.Timestamp.Before(conv.msgs[j].Info.Timestamp)
 		})
