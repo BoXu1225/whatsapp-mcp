@@ -202,3 +202,22 @@ func TestAPISendRejectsPathOutsideAllowlist(t *testing.T) {
 		})
 	}
 }
+
+func TestSendAllowedDirsSkipsRelativeEntries(t *testing.T) {
+	store := t.TempDir()
+	abs := t.TempDir()
+	// "." and "testdata-rel" would resolve against the bridge's working
+	// directory, which is not what anyone configuring the allowlist means.
+	t.Chdir(t.TempDir())
+	mustMkdir(t, "testdata-rel")
+	t.Setenv(sendAllowedDirsEnv, strings.Join([]string{".", "testdata-rel", abs}, string(os.PathListSeparator)))
+
+	dirs, err := sendAllowedDirs(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realAbs, _ := filepath.EvalSymlinks(abs)
+	if len(dirs) != 2 || dirs[1] != realAbs {
+		t.Errorf("dirs = %v, want only the outbox and %s", dirs, realAbs)
+	}
+}

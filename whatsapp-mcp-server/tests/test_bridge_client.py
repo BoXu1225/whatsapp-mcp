@@ -202,3 +202,19 @@ def test_send_audio_converted_file_lands_in_outbox(bridge_store, posts, monkeypa
     assert sent.startswith(outbox + os.sep)
     assert sent.endswith(".ogg")
     assert not os.path.exists(sent), "temporary converted file should be removed after sending"
+
+
+def test_relative_allowed_dir_ignored(bridge_store, posts, tmp_path, monkeypatch, capsys):
+    """Relative WHATSAPP_SEND_ALLOWED_DIRS entries would depend on the cwd; they are skipped with a warning."""
+    work = tmp_path / "work"
+    work.mkdir()
+    f = work / "doc.pdf"
+    f.write_bytes(b"%PDF")
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("WHATSAPP_SEND_ALLOWED_DIRS", os.pathsep.join([".", "work"]))
+    ok, _ = whatsapp.send_file(RECIPIENT, str(f))
+    assert not ok
+    assert posts == []
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "absolute" in err
