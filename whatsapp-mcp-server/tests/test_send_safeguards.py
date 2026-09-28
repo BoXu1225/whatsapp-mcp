@@ -114,3 +114,24 @@ def test_send_descriptions_require_explicit_request_and_preview(tool):
     assert "explicitly" in doc
     assert "exact" in doc
     assert "allow_unknown" in doc
+
+
+def test_bare_number_that_is_both_phone_and_lid_is_ambiguous(contacts_db, whatsmeow_db, sent):
+    from datetime import datetime, timezone
+
+    # 15550000007 is Gina's phone number and, separately, Hank's LID.
+    contacts_db.add_chat("15550000007@s.whatsapp.net", "Gina Example", datetime(2024, 1, 2, tzinfo=timezone.utc))
+    whatsmeow_db.add_lid_mapping("15550000007", "15550000008")
+    whatsmeow_db.add_contact("15550000008@s.whatsapp.net", full_name="Hank Example")
+
+    result = main.send_message("15550000007", "hi", allow_unknown=True)
+    assert result["success"] is False
+    assert sent == []
+    msg = result["message"]
+    assert "ambiguous" in msg
+    assert "15550000007@s.whatsapp.net" in msg and "Gina Example" in msg
+    assert "15550000007@lid" in msg and "Hank Example" in msg
+
+    # The full JID is unambiguous.
+    assert main.send_message("15550000007@lid", "hi")["recipient_name"] == "Hank Example"
+    assert main.send_message("15550000007@s.whatsapp.net", "hi")["recipient_name"] == "Gina Example"
