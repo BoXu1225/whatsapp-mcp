@@ -36,6 +36,9 @@ type DownloadMediaResponse struct {
 	Message  string `json:"message"`
 	Filename string `json:"filename,omitempty"`
 	Path     string `json:"path,omitempty"`
+
+	OriginalFilename string `json:"original_filename,omitempty"` // TODO(#19) stub
+	RetryRequested   bool   `json:"retry_requested,omitempty"`
 }
 
 // apiServer holds what the REST handlers need. send defaults to
@@ -55,6 +58,8 @@ type apiServer struct {
 	health      *bridgeHealth
 	isConnected func() bool
 	isLoggedIn  func() bool
+
+	media *mediaService // TODO(#19) stub
 }
 
 func newAPIServer(client *whatsmeow.Client, messageStore *MessageStore) *apiServer {
