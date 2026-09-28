@@ -9,23 +9,23 @@ import (
 	"testing"
 )
 
-// TestMain registers the REST handlers once, backed by a store in a temp dir
-// that lives for the whole package run (not tied to any one test's TempDir).
-// startRESTServer uses http.DefaultServeMux and also starts a listener; port 0
-// makes that an unused ephemeral port. API tests pass a nil client, so they
-// must only exercise paths that don't touch it.
+// apiStore backs the REST handler tests: a store in a temp dir that lives for
+// the whole package run (not tied to any one test's TempDir). API tests pass a
+// nil client, so they must only exercise paths that don't touch it.
+var apiStore *MessageStore
+
+// TestMain creates apiStore and removes it after the run.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "bridge-api-test-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	apiStore, err := NewMessageStoreAt(dir)
+	apiStore, err = NewMessageStoreAt(dir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	startRESTServer(nil, apiStore, 0)
 
 	code := m.Run()
 
@@ -34,10 +34,10 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// apiHandler returns the mux startRESTServer registered its handlers on.
+// apiHandler returns the REST handlers backed by apiStore and a nil client.
 func apiHandler(t *testing.T) http.Handler {
 	t.Helper()
-	return http.DefaultServeMux
+	return newAPIServer(nil, apiStore).handler()
 }
 
 func TestAPIRequestValidation(t *testing.T) {
