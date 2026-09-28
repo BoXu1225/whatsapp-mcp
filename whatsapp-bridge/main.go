@@ -200,8 +200,18 @@ func main() {
 
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
 
-	// Start REST API server
-	startRESTServer(client, messageStore, 8080)
+	// Start REST API server. Clients must send the token from store/bridge_token.
+	token, err := ensureBridgeToken("store")
+	if err != nil {
+		logger.Errorf("Failed to set up API token: %v", err)
+		return
+	}
+	api := newAPIServer(client, messageStore)
+	api.token = token
+	if err := startRESTServer(api, 8080); err != nil {
+		logger.Errorf("Failed to start REST API server: %v", err)
+		return
+	}
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)

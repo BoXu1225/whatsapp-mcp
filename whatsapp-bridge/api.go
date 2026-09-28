@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 )
@@ -172,18 +174,22 @@ func (s *apiServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Start a REST API server to expose the WhatsApp client functionality
-func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
-	s := newAPIServer(client, messageStore)
+// startRESTServer listens on 127.0.0.1:port (0 picks a free port) and serves
+// the API in the background. It records the bound port on s, since the Host
+// check needs it.
+func startRESTServer(s *apiServer, port int) error {
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return fmt.Errorf("REST API listen: %w", err)
+	}
+	s.port = ln.Addr().(*net.TCPAddr).Port
+	fmt.Printf("Starting REST API server on %s...\n", ln.Addr())
 
-	// Start the server
-	serverAddr := fmt.Sprintf("127.0.0.1:%d", port)
-	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
-
-	// Run server in a goroutine so it doesn't block
+	srv := &http.Server{Handler: s.handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
-		if err := http.ListenAndServe(serverAddr, s.handler()); err != nil {
+		if err := srv.Serve(ln); err != nil {
 			fmt.Printf("REST API server error: %v\n", err)
 		}
 	}()
+	return nil
 }

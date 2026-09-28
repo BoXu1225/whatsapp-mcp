@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/hex"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -77,5 +80,37 @@ func TestEnsureBridgeTokenReplacesInvalidFile(t *testing.T) {
 	info, _ := os.Stat(path)
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Errorf("token file mode = %o, want 600", perm)
+	}
+}
+
+func TestStartRESTServerRecordsPortAndGuards(t *testing.T) {
+	s, sent := newTestAPIServer(t)
+	s.port = 0
+	if err := startRESTServer(s, 0); err != nil {
+		t.Fatalf("startRESTServer: %v", err)
+	}
+	if s.port == 0 {
+		t.Fatal("port not recorded")
+	}
+	url := fmt.Sprintf("http://127.0.0.1:%d/api/send", s.port)
+
+	post := func(token string) int {
+		req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader(`{"recipient":"15550000001","message":"hi"}`))
+		req.Header.Set("Content-Type", "application/json")
+		if token != "" {
+			req.Header.Set(bridgeTokenHeader, token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := post(""); code != http.StatusUnauthorized {
+		t.Errorf("no token over TCP -> %d, want 401", code)
+	}
+	if code := post(testToken); code != http.StatusOK || len(*sent) != 1 {
+		t.Errorf("valid request over TCP -> %d (sent %d), want 200 and one send", code, len(*sent))
 	}
 }
