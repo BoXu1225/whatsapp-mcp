@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
@@ -59,11 +61,11 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 			}
 		}
 
-		// If we didn't get a name, try group info
+		// If we didn't get a name, ask the server (at most once per group
+		// and run; see groupNameCache).
 		if name == "" {
-			groupInfo, err := client.GetGroupInfo(context.Background(), jid)
-			if err == nil && groupInfo.Name != "" {
-				name = groupInfo.Name
+			if n, ok := groupNames.lookup(client, jid); ok {
+				name = n
 			} else {
 				// Fallback name for groups
 				name = fmt.Sprintf("Group %s", jid.User)
@@ -154,4 +156,54 @@ func backfillChatNames(client *whatsmeow.Client, messageStore *MessageStore, log
 		}
 	}
 	logger.Infof("Chat name backfill: updated %d chats", len(updates))
+}
+
+// groupNameRetryAfter is how long a failed group-name lookup is remembered
+// before the server is asked again.
+const groupNameRetryAfter = time.Hour
+
+// groupNameCache remembers group names from GetGroupInfo, so the event
+// handler asks the server about a group at most once per run (and once per
+// groupNameRetryAfter after a failure) instead of for every message.
+type groupNameCache struct {
+	mu      sync.Mutex
+	entries map[types.JID]groupNameEntry
+	fetch   func(client *whatsmeow.Client, jid types.JID) (string, error)
+	now     func() time.Time
+}
+
+type groupNameEntry struct {
+	name string // "" if the lookup failed
+	at   time.Time
+}
+
+var groupNames = newGroupNameCache()
+
+func newGroupNameCache() *groupNameCache {
+	return &groupNameCache{entries: map[types.JID]groupNameEntry{}, fetch: fetchGroupName, now: time.Now}
+}
+
+func fetchGroupName(client *whatsmeow.Client, jid types.JID) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	info, err := client.GetGroupInfo(ctx, jid)
+	if err != nil {
+		return "", err
+	}
+	return info.Name, nil
+}
+
+// lookup returns the group's name, if known or fetchable.
+func (c *groupNameCache) lookup(client *whatsmeow.Client, jid types.JID) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.entries[jid]; ok && (e.name != "" || c.now().Sub(e.at) < groupNameRetryAfter) {
+		return e.name, e.name != ""
+	}
+	name, err := c.fetch(client, jid)
+	if err != nil {
+		name = ""
+	}
+	c.entries[jid] = groupNameEntry{name: name, at: c.now()}
+	return name, name != ""
 }

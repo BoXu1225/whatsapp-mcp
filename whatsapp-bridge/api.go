@@ -225,16 +225,20 @@ func listenREST(port int) (net.Listener, error) {
 }
 
 // serveREST serves the API on ln in the background. It records the bound
-// port on s, since the Host check needs it.
+// port on s, since the Host check needs it. The channel receives the error
+// if the server stops for any reason other than Shutdown, and is closed
+// when it stops.
 func serveREST(s *apiServer, ln net.Listener) (*http.Server, <-chan error) {
 	s.port = ln.Addr().(*net.TCPAddr).Port
 	fmt.Printf("Starting REST API server on %s...\n", ln.Addr())
 
 	srv := &http.Server{Handler: s.handler(), ReadHeaderTimeout: 10 * time.Second}
+	errs := make(chan error, 1)
 	go func() {
-		if err := srv.Serve(ln); err != nil {
-			fmt.Printf("REST API server error: %v\n", err)
+		defer close(errs)
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errs <- fmt.Errorf("REST API server stopped: %w", err)
 		}
 	}()
-	return srv, make(chan error) // TODO(#21) stub
+	return srv, errs
 }

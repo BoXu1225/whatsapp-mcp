@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -139,8 +141,11 @@ type bridgeEvents struct {
 	ready     chan struct{}
 	readyOnce sync.Once
 
-	connected chan struct{} // TODO(#21) stub
-	fatal     chan error
+	// connected is closed on the first Connected event; fatal receives
+	// errLoggedOut when WhatsApp ends the session (main then exits 1).
+	connected     chan struct{}
+	connectedOnce sync.Once
+	fatal         chan error
 }
 
 func newBridgeEvents(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger) *bridgeEvents {
@@ -157,6 +162,10 @@ func (b *bridgeEvents) markReady() {
 func (b *bridgeEvents) handle(evt any) bool {
 	switch v := evt.(type) {
 	case *events.Message:
+		// Status updates are not a chat; skip them entirely (#21).
+		if v.Info.Chat.String() == statusBroadcastJID {
+			return true
+		}
 		<-b.ready
 		if !handleMessage(b.client, b.store, v, b.logger) {
 			return false
@@ -166,6 +175,7 @@ func (b *bridgeEvents) handle(evt any) bool {
 
 	case *events.HistorySync:
 		<-b.ready
+		dropStatusConversations(v)
 		handleHistorySync(b.client, b.store, v, b.logger)
 		b.storeDirectPaths(historyDirectPaths(v))
 
@@ -176,10 +186,19 @@ func (b *bridgeEvents) handle(evt any) bool {
 
 	case *events.Connected:
 		b.logger.Infof("Connected to WhatsApp")
-		go backfillChatNames(b.client, b.store, b.logger)
+		b.connectedOnce.Do(func() { close(b.connected) })
+		if b.client != nil {
+			go backfillChatNames(b.client, b.store, b.logger)
+		}
 
 	case *events.LoggedOut:
-		b.logger.Warnf("Device logged out, please scan QR code to log in again")
+		// whatsmeow has already deleted the device's session from
+		// store/whatsapp.db; nothing more can be received or sent.
+		b.logger.Errorf("%v (reason: %s). The bridge will exit. %s", errLoggedOut, v.Reason, repairHint)
+		select {
+		case b.fatal <- fmt.Errorf("%w (reason: %s)", errLoggedOut, v.Reason):
+		default: // already reported
+		}
 	}
 	return true
 }
@@ -190,6 +209,21 @@ func (b *bridgeEvents) storeDirectPaths(refs []directPathRef) {
 	if err := b.store.StoreDirectPaths(refs); err != nil {
 		b.logger.Warnf("Failed to store media direct paths: %v", err)
 	}
+}
+
+// dropStatusConversations removes status updates from a history sync, so no
+// name lookup or store work is spent on them (#21).
+func dropStatusConversations(evt *events.HistorySync) {
+	if evt.Data == nil {
+		return
+	}
+	kept := evt.Data.Conversations[:0]
+	for _, c := range evt.Data.Conversations {
+		if c.GetID() != statusBroadcastJID {
+			kept = append(kept, c)
+		}
+	}
+	evt.Data.Conversations = kept
 }
 
 // historyDirectPaths lists the media direct paths in a history sync.
@@ -220,98 +254,103 @@ func configureClient(client *whatsmeow.Client) {
 }
 
 func main() {
+	os.Exit(run())
+}
+
+// run starts the bridge and returns the process exit status: 0 after
+// SIGINT/SIGTERM, 1 on a startup failure, a logout or a REST server error.
+func run() int {
 	flags, err := parseFlags(os.Args[1:])
 	if err != nil {
-		os.Exit(2)
+		return 2
 	}
 	debugLogging = flags.debug
 	health := newBridgeHealth(time.Now()) // for /api/health, see health.go
 
-	// Set up logger
 	logger := waLog.Stdout("Client", "INFO", true)
 	logger.Infof("Starting WhatsApp client...")
-
-	// Create database connection for storing session data
 	dbLog := waLog.Stdout("Database", "INFO", true)
 
-	// Create directory for database if it doesn't exist (owner-only: it holds
-	// the device session keys, message history and the API token)
+	// Owner-only: it holds the device session keys, message history and the API token.
 	if err := os.MkdirAll("store", 0700); err != nil {
 		logger.Errorf("Failed to create store directory: %v", err)
-		return
+		return 1
 	}
 
-	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
+	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on&_busy_timeout=5000", dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
-		return
+		return 1
 	}
+	defer container.Close()
 
-	// Get device store - This contains session information
+	// The device store holds the session. Without one, GetFirstDevice
+	// returns a new device, which needs pairing.
 	deviceStore, err := container.GetFirstDevice(context.Background())
 	if err != nil {
-		if err == sql.ErrNoRows {
-			// No device exists, create one
-			deviceStore = container.NewDevice()
-			logger.Infof("Created new device")
-		} else {
-			logger.Errorf("Failed to get device: %v", err)
-			return
-		}
+		logger.Errorf("Failed to get device: %v", err)
+		return 1
+	}
+	if deviceStore.ID == nil {
+		logger.Infof("No linked device yet: a QR code will be shown for pairing")
 	}
 
-	// Create client instance
 	client := whatsmeow.NewClient(deviceStore, logger)
-	if client == nil {
-		logger.Errorf("Failed to create WhatsApp client")
-		return
-	}
+	configureClient(client)
 
-	// Initialize message store (runs pending schema migrations; see migrate.go)
+	// Message store; runs pending schema migrations (see migrate.go).
 	messageStore, err := NewMessageStore()
 	if err != nil {
 		logger.Errorf("Failed to initialize message store: %v", err)
-		os.Exit(1)
+		return 1
 	}
-	defer messageStore.Close()
 	messageStore.purgeDeleted = flags.purgeDeleted
+	// On every return: stop the REST server, disconnect, close the DB.
+	var httpServer *http.Server
+	var restListener net.Listener
+	defer func() {
+		var srv httpShutdowner
+		if httpServer != nil {
+			srv = httpServer
+		} else if restListener != nil {
+			restListener.Close()
+		}
+		shutdown(srv, client, messageStore, 10*time.Second)
+	}()
 
 	// Migrations that need our JIDs and the LID map. The device store is
 	// loaded, so this works before connecting.
 	if client.Store.ID != nil {
 		if _, err := messageStore.MigrateIdentity(clientIdentity(client)); err != nil {
 			logger.Errorf("Failed to migrate message store: %v", err)
-			messageStore.Close()
-			os.Exit(1)
+			return 1
 		}
 	} else if pending, err := messageStore.PendingIdentityMigrations(); err == nil && pending {
-		logger.Warnf("Not logged in yet: chat/sender identity migrations will run on the next start after login")
+		logger.Infof("Not logged in yet: the remaining migrations run right after pairing")
 	}
 
 	// API token and send allowlist (see security.go, allowlist.go)
 	token, err := ensureBridgeToken("store")
 	if err != nil {
 		logger.Errorf("Failed to set up API token: %v", err)
-		return
+		return 1
 	}
 	allowedDirs, err := sendAllowedDirs("store")
 	if err != nil {
 		logger.Errorf("Failed to set up outbox: %v", err)
-		return
+		return 1
 	}
 	if err := hardenStorePermissions("store"); err != nil {
 		logger.Errorf("Failed to restrict store permissions: %v", err)
-		return
+		return 1
 	}
 	// Bind the REST port before connecting: if another bridge already holds
 	// it, stop here rather than connect and kick that bridge's session.
-	restListener, err := listenREST(8080)
+	restListener, err = listenREST(8080)
 	if err != nil {
 		logger.Errorf("Failed to start REST API server (is another bridge running?): %v", err)
-		messageStore.Close()
-		os.Exit(1)
+		return 1
 	}
-	defer restListener.Close()
 
 	if debugLogging {
 		logger.Warnf("Debug logging on: message content, names and file paths will be logged")
@@ -322,7 +361,6 @@ func main() {
 
 	// Messages, history sync and connection events. A message that fails to
 	// store is not acknowledged (see bridgeEvents).
-	configureClient(client)
 	media := newMediaService(clientFetcher(client), messageStore)
 	bridge := newBridgeEvents(client, messageStore, logger)
 	bridge.media = media
@@ -331,66 +369,72 @@ func main() {
 	}
 	client.AddEventHandlerWithSuccessStatus(bridge.handle)
 
-	// Create channel to track connection success
-	connected := make(chan bool, 1)
+	// stop receives the reason to exit: a signal (errInterrupted, exit 0) or
+	// a logout (exit 1).
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	stop := make(chan error, 2)
+	go func() { sig := <-sigs; stop <- fmt.Errorf("%w (%v)", errInterrupted, sig) }()
+	go func() { stop <- <-bridge.fatal }()
 
-	// Connect to WhatsApp
 	if client.Store.ID == nil {
-		// No ID stored, this is a new client, need to pair with phone
+		// New device: pair with the phone by QR code.
+		// Background reconnects need a session, so fail fast while pairing.
+		client.InitialAutoReconnect = false
 		qrChan, _ := client.GetQRChannel(context.Background())
-		err = client.Connect()
-		if err != nil {
+		if err := client.Connect(); err != nil {
 			logger.Errorf("Failed to connect: %v", err)
-			return
+			return 1
 		}
-
-		// Print QR code for pairing with phone
-		for evt := range qrChan {
-			if evt.Event == "code" {
-				fmt.Println("\nScan this QR code with your WhatsApp app:")
-				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-			} else if evt.Event == "success" {
-				connected <- true
-				break
+		paired := false
+	qrLoop:
+		for {
+			select {
+			case evt, ok := <-qrChan:
+				if !ok {
+					break qrLoop
+				}
+				switch evt.Event {
+				case "code":
+					fmt.Println("\nScan this QR code with your WhatsApp app:")
+					qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+				case "success":
+					paired = true
+					break qrLoop
+				default:
+					logger.Errorf("Pairing ended: %s", evt.Event)
+					break qrLoop
+				}
+			case err := <-stop:
+				return exitStatus(logger, err)
 			}
 		}
-
-		// Wait for connection
-		select {
-		case <-connected:
-			fmt.Println("\nSuccessfully connected and authenticated!")
-			// Now that we know our JIDs, finish the migrations before any
-			// message is stored (message events wait for markReady).
-			if _, err := messageStore.MigrateIdentity(clientIdentity(client)); err != nil {
-				logger.Errorf("Failed to migrate message store: %v", err)
-				client.Disconnect()
-				messageStore.Close()
-				os.Exit(1)
-			}
-			bridge.markReady()
-		case <-time.After(3 * time.Minute):
-			logger.Errorf("Timeout waiting for QR code scan")
-			return
+		if !paired {
+			logger.Errorf("Pairing failed or timed out; run the bridge again to get a new QR code")
+			return 1
 		}
+		fmt.Println("\nSuccessfully paired!")
+		// Now that we know our JIDs, finish the migrations before any
+		// message is stored (message events wait for markReady).
+		if _, err := messageStore.MigrateIdentity(clientIdentity(client)); err != nil {
+			logger.Errorf("Failed to migrate message store: %v", err)
+			return 1
+		}
+		bridge.markReady()
 	} else {
-		// Already logged in, just connect
-		err = client.Connect()
-		if err != nil {
+		// A retryable network error here is retried in the background
+		// (InitialAutoReconnect); anything else is fatal.
+		if err := client.Connect(); err != nil {
 			logger.Errorf("Failed to connect: %v", err)
-			return
+			return 1
 		}
-		connected <- true
 	}
 
-	// Wait a moment for connection to stabilize
-	time.Sleep(2 * time.Second)
-
-	if !client.IsConnected() {
-		logger.Errorf("Failed to establish stable connection")
-		return
+	logger.Infof("Waiting up to %v for the WhatsApp connection...", connectTimeout)
+	if err := waitForConnection(bridge.connected, stop, connectTimeout); err != nil {
+		return exitStatus(logger, err)
 	}
-
-	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
+	fmt.Println("\n✓ Connected to WhatsApp!")
 
 	// Start REST API server. Clients must send the token from store/bridge_token.
 	logger.Infof("Files can be sent from: %s", strings.Join(allowedDirs, ", "))
@@ -399,18 +443,19 @@ func main() {
 	api.allowedDirs = allowedDirs
 	api.health = health
 	api.media = media
-	serveREST(api, restListener)
-
-	// Create a channel to keep the main goroutine alive
-	exitChan := make(chan os.Signal, 1)
-	signal.Notify(exitChan, syscall.SIGINT, syscall.SIGTERM)
+	srv, restErrs := serveREST(api, restListener)
+	httpServer = srv
 
 	fmt.Println("REST server is running. Press Ctrl+C to disconnect and exit.")
 
-	// Wait for termination signal
-	<-exitChan
-
-	fmt.Println("Disconnecting...")
-	// Disconnect client
-	client.Disconnect()
+	select {
+	case err := <-stop:
+		return exitStatus(logger, err)
+	case err, ok := <-restErrs:
+		if !ok {
+			err = errors.New("REST API server stopped")
+		}
+		logger.Errorf("%v; exiting so the bridge can be restarted", err)
+		return 1
+	}
 }

@@ -58,7 +58,7 @@ var migrations = []migration{
 	{version: 3, name: "canonical_chats", needsIdentity: true, run: migrateCanonicalChats},
 	{version: 4, name: "canonical_senders", needsIdentity: true, run: migrateCanonicalSenders},
 	{version: 5, name: "message_capture", run: migrateMessageCapture},
-	{version: 6, name: "media_direct_path", run: migrateDirectPath},
+	{version: 6, name: "direct_path_drop_status", run: migrateDirectPath},
 }
 
 func (store *MessageStore) ensureSchemaVersionTable() error {
@@ -650,18 +650,24 @@ func (store *MessageStore) ensureCaptureSchemaEarly() error {
 	return tx.Commit()
 }
 
-// --- 6: media direct path (#19) ----------------------------------------------
+// --- 6: media direct path (#19), no status broadcasts (#21) -------------------
 
-// migrateDirectPath adds messages.direct_path: the media's path on WhatsApp's
-// media servers, used for downloads instead of parsing the URL.
+// migrateDirectPath adds messages.direct_path (the media's path on WhatsApp's
+// media servers, used for downloads instead of parsing the URL) and removes
+// status updates older versions stored as a status@broadcast chat.
 func migrateDirectPath(tx *sql.Tx, _ *Identity, _ *migrationReport) error {
 	var n int
 	if err := tx.QueryRow("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'direct_path'").Scan(&n); err != nil {
 		return err
 	}
-	if n > 0 {
-		return nil
+	if n == 0 {
+		if _, err := tx.Exec("ALTER TABLE messages ADD COLUMN direct_path TEXT"); err != nil {
+			return err
+		}
 	}
-	_, err := tx.Exec("ALTER TABLE messages ADD COLUMN direct_path TEXT")
+	if _, err := tx.Exec("DELETE FROM messages WHERE chat_jid = ?", statusBroadcastJID); err != nil {
+		return err
+	}
+	_, err := tx.Exec("DELETE FROM chats WHERE jid = ?", statusBroadcastJID)
 	return err
 }

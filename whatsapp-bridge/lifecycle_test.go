@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -292,5 +293,18 @@ func TestServeRESTReportsServerErrors(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Error("closed listener not reported")
+	}
+}
+
+func TestExitStatus(t *testing.T) {
+	logger := waLog.Noop
+	if got := exitStatus(logger, fmt.Errorf("%w (terminated)", errInterrupted)); got != 0 {
+		t.Errorf("signal -> %d, want 0", got)
+	}
+	if got := exitStatus(logger, errLoggedOut); got != 1 {
+		t.Errorf("logged out -> %d, want 1", got)
+	}
+	if got := exitStatus(logger, errors.New("not connected")); got != 1 {
+		t.Errorf("connect timeout -> %d, want 1", got)
 	}
 }
