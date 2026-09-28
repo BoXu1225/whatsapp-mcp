@@ -51,6 +51,7 @@ LEGACY_BRIDGE_SCHEMA = """
 
 PRE_CAPTURE_BRIDGE_SCHEMA = LEGACY_BRIDGE_SCHEMA + """
     ALTER TABLE messages ADD COLUMN sender_alt TEXT;
+    ALTER TABLE messages ADD COLUMN direct_path TEXT;
 """
 
 # Migration 5 (message capture, #15/#16): reply context, edits, deletes, reactions.
