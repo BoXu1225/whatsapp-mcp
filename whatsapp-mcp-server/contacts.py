@@ -310,7 +310,9 @@ class Directory:
     def resolve_recipient(self, value: str) -> Recipient:
         """Resolve a send recipient to a full JID.
 
-        Raises ValueError for input that isn't a phone number or JID.
+        A known person with a direct chat resolves to that chat's JID, whichever
+        form (phone or LID) the input used. Raises ValueError for input that
+        isn't a phone number or JID, or a bare number that is ambiguous.
         """
         user, server = split_jid(value)
         if server is not None and server not in DIRECT_SERVERS:
@@ -335,4 +337,7 @@ class Directory:
                 f"{' and '.join(candidates)}. Pass the full JID of the intended recipient."
             )
         person = self.person(value)
-        return Recipient(jid=ident.jid, name=person.name if person else None, known=person is not None)
+        if person is None:
+            return Recipient(jid=ident.jid, name=None, known=False)
+        # Reuse the existing direct chat so a phone number doesn't open a second thread with a LID-keyed contact.
+        return Recipient(jid=person.chat_jid or ident.jid, name=person.name, known=True)
