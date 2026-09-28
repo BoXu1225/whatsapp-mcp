@@ -29,4 +29,4 @@ select = ["E", "F", "I"]
 
 [tool.ruff.lint.isort]
 combine-as-imports = true
-known-first-party = ["audio", "contacts", "main", "whatsapp"]
+known-first-party = ["audio", "contacts", "main", "status", "whatsapp"]
