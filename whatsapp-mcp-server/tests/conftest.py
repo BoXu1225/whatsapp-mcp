@@ -4,9 +4,10 @@ Fixtures:
     messages_db   -- empty bridge messages.db (schema from whatsapp-bridge/store.go);
                      whatsapp.MESSAGES_DB_PATH points at it for the test.
     seeded_db     -- messages_db with a few fake chats and messages (see SEED below).
-    whatsmeow_db  -- fake whatsmeow device store with whatsmeow_contacts and
-                     whatsmeow_lid_map only. Nothing reads it yet; it is here for
-                     tests of code that resolves names from the device store.
+    whatsmeow_db  -- fake whatsmeow device store (whatsapp.db next to messages.db)
+                     with whatsmeow_contacts and whatsmeow_lid_map only. The
+                     contact-resolution layer finds it via MESSAGES_DB_PATH.
+    contacts_db   -- seeded_db plus contacts/LID fixtures (see contacts_db below).
 
 All data is fake: +1 555 numbers, made-up names.
 """
@@ -135,6 +136,7 @@ def isolate_from_real_bridge(monkeypatch, tmp_path):
     HTTP calls fail instead of reaching the bridge REST API.
     """
     monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(tmp_path / "missing" / "messages.db"))
+    monkeypatch.delenv("WHATSMEOW_DB_PATH", raising=False)
 
     def blocked(*args, **kwargs):
         raise AssertionError("tests must not make HTTP requests to the bridge")
@@ -184,3 +186,50 @@ def seeded_db(messages_db):
 @pytest.fixture
 def whatsmeow_db(tmp_path):
     return FakeWhatsmeowDB(tmp_path / "whatsapp.db")
+
+
+# Contact-resolution fixtures (#12). All fake.
+CAROL_PN = "15550000003"
+CAROL_LID = "100000000000003"
+CAROL_LID_JID = CAROL_LID + "@lid"
+DAVE_PN = "15550000004"
+ERIN_LID = "100000000000005"
+ERIN_LID_JID = ERIN_LID + "@lid"
+# Its digits contain Alice's number, so a substring match on "15550000001" hits it.
+ALICE_LOOKALIKE = "115550000001@s.whatsapp.net"
+
+
+@pytest.fixture
+def contacts_db(seeded_db, whatsmeow_db):
+    """seeded_db plus:
+
+    Carol  -- phone 15550000003, LID 100000000000003. Her direct chat is the
+              @lid JID with a placeholder name; her name is only in the device
+              store (under her phone JID). She writes from her LID in both
+              sender formats: bare user in her chat, full JID in the group.
+    Dave   -- device-store contact only (phone 15550000004), no chat.
+    Erin   -- @lid chat named "Erin Example", no LID mapping.
+    Lookalike -- chat 115550000001@s.whatsapp.net, inserted before Alice's.
+    """
+    db = seeded_db
+    with sqlite3.connect(db.path) as conn:
+        # Recreate Alice's chat after the lookalike so a table scan meets the lookalike first.
+        conn.execute("DELETE FROM chats WHERE jid = ?", (ALICE,))
+    db.add_chat(ALICE_LOOKALIKE, "Alicia Lookalike", _t(1))
+    db.add_chat(ALICE, "Alice Example", _t(2))
+
+    db.add_chat(CAROL_LID_JID, CAROL_LID, _t(7))
+    db.add_message("c1", CAROL_LID_JID, CAROL_LID, "carol here", _t(6))
+    db.add_message("c2", CAROL_LID_JID, OWN_JID.split("@")[0], "hi carol", _t(7), is_from_me=True)
+    db.add_message("c3", GROUP, CAROL_LID_JID, "carol in group", _t(8))
+    db.add_chat(GROUP, "Test Group", _t(8))
+
+    db.add_chat(ERIN_LID_JID, "Erin Example", _t(4))
+    db.add_message("e1", ERIN_LID_JID, ERIN_LID, "erin here", _t(4))
+
+    whatsmeow_db.add_contact(ALICE, full_name="Alice Example", push_name="ally")
+    whatsmeow_db.add_contact(CAROL_PN + "@s.whatsapp.net", full_name="Carol Example", push_name="caz")
+    whatsmeow_db.add_lid_mapping(CAROL_LID, CAROL_PN)
+    whatsmeow_db.add_contact(DAVE_PN + "@s.whatsapp.net", first_name="Dave", push_name="davey")
+    whatsmeow_db.add_contact("15550000006@s.whatsapp.net", business_name="Fake Bakery", push_name="bakery")
+    return db
