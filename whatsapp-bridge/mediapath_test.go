@@ -271,3 +271,14 @@ func TestSafeMediaFilenameTruncatesKeepingExtension(t *testing.T) {
 		t.Errorf("short name changed to %q", got)
 	}
 }
+
+func TestMediaLocalPathRejectsReservedChatNames(t *testing.T) {
+	for _, chat := range []string{outboxDirName, "bridge_token", "messages.db", "whatsapp.db", "bridge.log", "not-a-jid"} {
+		t.Run(chat, func(t *testing.T) {
+			storeDir := storeUnderTemp(t)
+			if got, err := mediaLocalPath(storeDir, chat, "x.jpg"); err == nil {
+				t.Errorf("mediaLocalPath(chat %q) = %q, want rejection (downloads must never land in the outbox or on store files)", chat, got)
+			}
+		})
+	}
+}
