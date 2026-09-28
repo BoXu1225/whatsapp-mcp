@@ -32,6 +32,7 @@ func clientChatNamer(client *whatsmeow.Client, messageStore *MessageStore, logge
 
 // liveStored describes a stored live message, for logging.
 type liveStored struct {
+	kind                       string // see processed
 	stored                     bool
 	chatJID, sender            string
 	content, mediaType, fileNm string
@@ -67,25 +68,14 @@ func storeLiveMessage(messageStore *MessageStore, id Identity, msg *events.Messa
 	sender, senderAlt := id.LiveSender(info, chat)
 	out := liveStored{chatJID: chatJID, sender: sender}
 
-	// Update chat in database with the message timestamp (keeps last message time updated)
-	if err := messageStore.StoreChat(chatJID, name(chat, nil), info.Timestamp); err != nil {
-		return out, fmt.Errorf("failed to store chat: %v", err)
-	}
-
-	out.content = extractTextContent(msg.Message)
-	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message)
-	out.mediaType, out.fileNm = mediaType, filename
-
-	// Skip if there's no content and no media
-	if out.content == "" && mediaType == "" {
-		return out, nil
-	}
-
-	err := messageStore.StoreMessageWithAlt(
-		info.ID, chatJID, sender, senderAlt, out.content, info.Timestamp, info.IsFromMe,
-		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
-	)
-	out.stored = err == nil
+	res, err := processMessage(messageStore, msg, captureTarget{
+		chat:      chat,
+		chatName:  func() string { return name(chat, nil) },
+		sender:    sender,
+		senderAlt: senderAlt,
+	})
+	out.kind, out.stored = res.kind, res.stored
+	out.content, out.mediaType, out.fileNm = res.content, res.mediaType, res.filename
 	return out, err
 }
 

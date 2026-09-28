@@ -21,6 +21,7 @@ type Message struct {
 // Database handler for storing message history
 type MessageStore struct {
 	db         *sql.DB
+	tx         *sql.Tx    // set on the view InTx passes to its callback
 	dir        string     // store directory; downloaded media is saved under it
 	backupPath string     // backup made in this process (migration or first live merge), if any
 	backupMu   sync.Mutex // guards backupPath for live merges
@@ -91,11 +92,56 @@ func (store *MessageStore) Close() error {
 	return store.db.Close()
 }
 
-// Store a chat in the database. Times are stored in UTC.
+// sqlConn is what *sql.DB and *sql.Tx have in common.
+type sqlConn interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// conn is the transaction when inside InTx, else the database.
+func (store *MessageStore) conn() sqlConn {
+	if store.tx != nil {
+		return store.tx
+	}
+	return store.db
+}
+
+// InTx runs fn with a view of the store whose writes all go through one
+// transaction, committed if fn returns nil and rolled back otherwise. Don't
+// call MergeChat on the view (it has its own transaction and backup).
+func (store *MessageStore) InTx(fn func(tx *MessageStore) error) error {
+	if store.tx != nil {
+		return fn(store)
+	}
+	tx, err := store.db.Begin()
+	if err != nil {
+		return err
+	}
+	view := &MessageStore{db: store.db, tx: tx, dir: store.dir}
+	if err := fn(view); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// Store a chat in the database. Times are stored in UTC. last_message_time
+// only moves forward (an older history chunk can arrive after newer
+// messages), and an empty name keeps the stored one.
 func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time) error {
-	_, err := store.db.Exec(
-		"INSERT OR REPLACE INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)",
-		jid, name, lastMessageTime.UTC(),
+	var last interface{}
+	if !lastMessageTime.IsZero() {
+		last = lastMessageTime.UTC()
+	}
+	_, err := store.conn().Exec(
+		`INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)
+		ON CONFLICT(jid) DO UPDATE SET
+			name = COALESCE(NULLIF(excluded.name, ''), chats.name),
+			last_message_time = CASE
+				WHEN chats.last_message_time IS NULL OR excluded.last_message_time > chats.last_message_time
+				THEN excluded.last_message_time ELSE chats.last_message_time END`,
+		jid, name, last,
 	)
 	return err
 }
@@ -117,7 +163,7 @@ func (store *MessageStore) StoreMessageWithAlt(id, chatJID, sender, senderAlt, c
 		return nil
 	}
 
-	_, err := store.db.Exec(
+	_, err := store.conn().Exec(
 		`INSERT OR REPLACE INTO messages
 		(id, chat_jid, sender, sender_alt, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length)
 		VALUES (?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -135,6 +181,9 @@ func (store *MessageStore) StoreMessageWithAlt(id, chatJID, sender, senderAlt, c
 func (store *MessageStore) MergeChat(from, to string, id Identity) error {
 	if from == to || from == "" {
 		return nil
+	}
+	if store.tx != nil {
+		return fmt.Errorf("MergeChat inside a transaction")
 	}
 	var one int
 	if err := store.db.QueryRow("SELECT 1 FROM chats WHERE jid = ?", from).Scan(&one); err != nil {

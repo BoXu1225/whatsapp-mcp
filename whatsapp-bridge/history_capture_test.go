@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -177,7 +178,7 @@ func TestHistoryUnwrapsWrappedMessages(t *testing.T) {
 	want := map[string]struct{ content, mediaType string }{
 		"W1": {"disappearing hello", ""},
 		"W2": {"", "image"},
-		"W3": {"the plan", "document"},
+		"W3": {"", "document"}, // the caption: see TestCaptureMessageTypes (#15)
 		"W4": {"see https://example.com", ""},
 	}
 	for id, w := range want {
@@ -190,5 +191,34 @@ func TestHistoryUnwrapsWrappedMessages(t *testing.T) {
 		if content != w.content || mediaType != w.mediaType {
 			t.Errorf("%s = (%q, %q), want (%q, %q)", id, content, mediaType, w.content, w.mediaType)
 		}
+	}
+}
+
+// A history batch is written in one transaction: InTx commits everything or
+// nothing.
+func TestInTxCommitsOrRollsBack(t *testing.T) {
+	store := newTestStore(t)
+	ts := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	boom := fmt.Errorf("boom")
+	err := store.InTx(func(tx *MessageStore) error {
+		if err := tx.StoreChat(danChat, "Dan Example", ts); err != nil {
+			return err
+		}
+		return boom
+	})
+	if err != boom {
+		t.Fatalf("InTx error = %v, want boom", err)
+	}
+	if got := chatRows(t, store); len(got) != 0 {
+		t.Errorf("rolled-back transaction left chats %v", got)
+	}
+	if err := store.InTx(func(tx *MessageStore) error { return tx.StoreChat(danChat, "Dan Example", ts) }); err != nil {
+		t.Fatal(err)
+	}
+	if got := chatRows(t, store); len(got) != 1 {
+		t.Errorf("committed transaction: chats %v", got)
+	}
+	if err := store.InTx(func(tx *MessageStore) error { return tx.MergeChat(danChat, "100000000000004@lid", Identity{}) }); err == nil {
+		t.Error("MergeChat inside InTx should be refused")
 	}
 }
