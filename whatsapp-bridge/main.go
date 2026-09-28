@@ -81,12 +81,12 @@ func storeLiveMessage(messageStore *MessageStore, id Identity, msg *events.Messa
 }
 
 // Handle regular incoming messages with media support
-func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) {
+func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) bool {
 	res, err := storeLiveMessage(messageStore, clientIdentity(client), msg, clientChatNamer(client, messageStore, logger))
 	chatJID, sender := res.chatJID, res.sender
 	content, mediaType, filename := res.content, res.mediaType, res.fileNm
 	if err == nil && !res.stored {
-		return
+		return true
 	}
 
 	if err != nil {
@@ -117,7 +117,19 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 			fmt.Printf("[%s] %s %s in %s: id=%s %s, %d chars\n", timestamp, direction, sender, chatJID, msg.Info.ID, kind, len(content))
 		}
 	}
+	return true
 }
+
+// TODO(#18) stubs so the tests compile.
+type bridgeEvents struct{}
+
+func newBridgeEvents(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger) *bridgeEvents {
+	return &bridgeEvents{}
+}
+
+func (b *bridgeEvents) handle(evt any) bool { return true }
+
+func configureClient(client *whatsmeow.Client) {}
 
 func main() {
 	flags, err := parseFlags(os.Args[1:])
