@@ -149,7 +149,8 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 		return false, "", "", "", fmt.Errorf("failed to save media file: %v", err)
 	}
 
-	fmt.Printf("Successfully downloaded %s media to %s (%d bytes)\n", mediaType, absPath, len(mediaData))
+	fmt.Printf("Downloaded %s media for message %s in %s (%d bytes)\n", mediaType, messageID, chatJID, len(mediaData))
+	debugPrintf("Saved media to %s\n", absPath)
 	return true, mediaType, filename, absPath, nil
 }
 

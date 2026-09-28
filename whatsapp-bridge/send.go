@@ -98,7 +98,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 			return false, fmt.Sprintf("Error uploading media: %v", err)
 		}
 
-		fmt.Println("Media uploaded", resp)
+		debugPrintf("Media uploaded: %+v\n", resp)
 
 		// Create the appropriate message type based on media type
 		switch mediaType {
