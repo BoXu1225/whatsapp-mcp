@@ -44,6 +44,8 @@ type apiServer struct {
 
 	token string // required X-Bridge-Token value
 	port  int    // port the listener is bound to; the Host header must match
+
+	allowedDirs []string // media_path must resolve inside one of these
 }
 
 func newAPIServer(client *whatsmeow.Client, messageStore *MessageStore) *apiServer {
@@ -86,6 +88,17 @@ func (s *apiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	if req.Message == "" && req.MediaPath == "" {
 		http.Error(w, "Message or media path is required", http.StatusBadRequest)
 		return
+	}
+
+	if req.MediaPath != "" {
+		resolved, err := resolveSendPath(req.MediaPath, s.allowedDirs)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(SendMessageResponse{Success: false, Message: err.Error()})
+			return
+		}
+		req.MediaPath = resolved
 	}
 
 	fmt.Println("Received request to send message", req.Message, req.MediaPath)
