@@ -66,7 +66,7 @@ def test_list_messages_formats_output(seeded_db):
 
 def test_list_messages_shows_media_marker(seeded_db):
     out = whatsapp.list_messages(chat_jid=BOB, include_context=False)
-    assert "[image - Message ID: b1" in out
+    assert "ID: b1 | From: Bob Example: [image] photo" in out
 
 
 def test_get_sender_name(seeded_db):
