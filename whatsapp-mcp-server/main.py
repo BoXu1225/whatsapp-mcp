@@ -30,7 +30,7 @@ def search_contacts(query: str) -> List[Dict[str, Any]]:
 
     Each result has separate fields:
       jid      - the JID to use for this person (their existing chat if any, else phone JID, else LID JID)
-      phone    - phone number with country code, digits only; None if unknown.
+      phone    - phone number with country code, digits only; None if unknown
       lid      - WhatsApp LID (an opaque ID, NOT a phone number); None if unknown
       name     - display name (address book name > business name > push name > chat name)
       chat_jid - existing direct chat JID, or None
