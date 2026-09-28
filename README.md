@@ -104,7 +104,8 @@ This application consists of two main components:
 - Message history is in `whatsapp-bridge/store/messages.db` (tables `chats`, `messages` and `reactions`); the WhatsApp session, contacts and LID map are in whatsmeow's `whatsapp-bridge/store/whatsapp.db`.
 - Live messages and history sync go through the same code, so both store the same things: text; media with its caption; stickers (media type `sticker`); locations and live locations as `[location lat,lng name]` / `[live location lat,lng] caption`; shared contacts as `[contact Name]` / `[contacts A, B]`; polls as `[poll] question: option 1 / option 2` (votes are not stored); the ID of the message a reply quotes; and reactions (in `reactions`; an empty reaction removes it). Wrapped messages (disappearing, view-once, document with caption) are unwrapped. A history batch is written in one transaction, and a chat's `last_message_time` never moves backwards.
 - Edits replace the stored text and set `edited_at` (only the author's edits apply). A message deleted for everyone is marked `is_deleted` with `deleted_at` and keeps its text (shown as `[deleted] <text>`); start the bridge with `-purge-deleted` to clear the text of messages their author deletes from then on. In a group, a delete by someone other than the author (an admin; the bridge can't check) is recorded in `deleted_by` and never clears the text.
-- Downloaded media goes to `whatsapp-bridge/store/<chat>/`; files to send go in `whatsapp-bridge/store/outbox/`.
+- `messages.db` is opened in WAL mode with a 5 s busy timeout, so the MCP server can read while the bridge writes. A message the bridge fails to store is not acknowledged to WhatsApp; whatsmeow keeps the decrypted copy and hands it over again when the server redelivers it (on a later connection).
+- Downloaded media goes to `whatsapp-bridge/store/<chat>/<message ID>.<ext>`; files to send go in `whatsapp-bridge/store/outbox/`.
 - `store/` is private data and is git-ignored.
 
 ### Schema migrations
@@ -116,6 +117,9 @@ This application consists of two main components:
 3. A 1:1 chat is keyed by the person's LID JID when the LID is known, else by their phone JID. Phone-number and LID copies of the same chat are merged (also later, when a message reveals the mapping; the first such merge in a run backs up `messages.db` first). This step and the next run once the device store has loaded, and only when logged in.
 4. Senders are full JIDs without device part (`user@server`). In a 1:1 chat the other person uses the chat's JID. Your own messages use your LID in LID chats and your phone JID elsewhere, including groups. Bare numbers whose server can't be determined are left as they were.
 5. Message capture: `messages.reply_to` (ID of the quoted message), `edited_at`, `is_deleted`, `deleted_at` and `deleted_by`, and a `reactions` table (one row per message and sender: `message_id`, `chat_jid`, `sender`, `emoji`, `timestamp`). It needs no login; if it has to wait behind steps 3 and 4 (not logged in yet), its columns are added at start anyway so new messages can be stored.
+6. `messages.direct_path` stores each media file's path on WhatsApp's servers, used for downloads. Status updates stored by older versions (`status@broadcast`) are removed; new ones are skipped.
+
+Migrations are applied by version: one that isn't recorded in `schema_version` runs even if a higher one already has. On a first run the migrations that need the login run right after the QR code is scanned, before any message is stored.
 
 To upgrade, rebuild and restart the bridge. Restart the MCP server too. Until the bridge has migrated the database, time filters may be off by the UTC offset. Downloaded media of a re-keyed chat stays in the old `store/<phone JID>/` folder, where `download_media` with the new chat JID still finds it. Downgrading is not supported; to go back, restore the `.bak` file as `store/messages.db`.
 
@@ -138,7 +142,8 @@ Claude can access the following tools to interact with WhatsApp:
 - **send_message**: Send a WhatsApp message to a person or group
 - **send_file**: Send a file (image, video, raw audio, document) to a person or group
 - **send_audio_message**: Send an audio file as a WhatsApp voice message (requires the file to be an .ogg opus file or ffmpeg must be installed)
-- **download_media**: Download media from a WhatsApp message and get the local file path
+- **download_media**: Download media from a WhatsApp message and get the local file path (and the sender's `original_filename`). If the media has expired on WhatsApp's servers, the bridge asks the sender's phone to upload it again and the tool returns `retry_requested`; call it again shortly
+- **request_history**: Ask your phone for up to 50 messages older than the oldest stored one in a chat. The messages arrive asynchronously (the phone must be online) and are stored like other history; check `list_messages` again afterwards
 
 `list_messages`, `list_chats` and `list_awaiting_reply` start with a one-line header such as `[bridge up · data as of 2026-09-28T09:12:00Z]` or `[WARNING: bridge down since ~… · data as of …; newer messages are missing]`, so a stopped bridge doesn't look like a quiet inbox. For `list_messages` it is the first line of the text; `list_chats` and `list_awaiting_reply` return `{"status": <header>, "chats": [...]}`. The header's bridge check times out after 0.5 s and is cached for 5 s; `get_status` always checks afresh with a 2 s timeout.
 
@@ -191,7 +196,9 @@ Files can only be sent from `whatsapp-bridge/store/outbox/` (or directories list
 
 #### Media Downloading
 
-By default, just the metadata of the media is stored in the local database. The message will indicate that media was sent. To access this media you need to use the download_media tool which takes the `message_id` and `chat_jid` (which are shown when printing messages containing the meda), this downloads the media and then returns the file path which can be then opened or passed to another tool.
+Only the media's metadata is stored in the local database. `download_media` takes the `message_id` and `chat_jid` (shown with each media message), downloads the file to `store/<chat>/<message ID>.<ext>` and returns its path, plus the sender's file name as `original_filename`. Files downloaded by older versions under their old names are still found (checked against the message's SHA-256 when it has one).
+
+Old media expires on WhatsApp's servers (HTTP 404/410). The bridge then sends a media retry request to the sender's phone and answers with HTTP 202 and `retry_requested`; when the phone re-uploads, the bridge stores the new path and downloads the file, so asking again a little later returns it. If the phone no longer has the file, the next call says so.
 
 ## Security
 
@@ -209,11 +216,18 @@ Incoming WhatsApp messages are untrusted input read by an LLM that can also send
 1. The MCP client (e.g. Claude) calls tools on the Python MCP server over stdio.
 2. Read tools query the SQLite databases in `whatsapp-bridge/store/` directly.
 3. The Go bridge stays connected to WhatsApp and keeps those databases up to date.
-4. Sending, media downloads and `get_status` go through the bridge's REST API on `127.0.0.1:8080`.
+4. Sending, media downloads, history requests and `get_status` go through the bridge's REST API on `127.0.0.1:8080` (`POST /api/send`, `POST /api/download`, `POST /api/history`, `GET /api/health`).
+
+### Bridge lifecycle
+
+- **Startup**: the bridge binds port 8080, connects and waits up to 60 s for the connection. A transient network error on the first attempt is retried in the background; after 60 s without a connection the bridge exits with status 1.
+- **Logged out**: if WhatsApp ends the session (device removed on the phone, long inactivity), the bridge logs it and exits with status 1. Re-link it with `scripts/bridge.sh fg` and scan the QR code; the message history is kept.
+- **REST server errors** also end the bridge with status 1 so it can be restarted.
+- **Shutdown** (Ctrl+C, SIGTERM): the REST server stops first (up to 10 s for requests in flight), then the WhatsApp connection, then the database.
 
 ## Troubleshooting
 
-- **Stale or missing messages**: call `get_status` or run `scripts/bridge.sh health`. If the bridge is down, `scripts/bridge.sh start`; if it's logged out, `scripts/bridge.sh stop && scripts/bridge.sh fg` and scan the QR code. Check `scripts/bridge.sh logs` for errors.
+- **Stale or missing messages**: call `get_status` or run `scripts/bridge.sh health`. If the bridge is down, `scripts/bridge.sh start`; if it exited because it was logged out (the log says so), `scripts/bridge.sh fg` and scan the QR code. Check `scripts/bridge.sh logs` for errors. For older messages than the bridge has, use `request_history`.
 - **Port 8080 in use**: another bridge (or something else) is listening. The bridge exits with status 1 instead of starting a second WhatsApp session; stop the other one first.
 - **`uv` not found by the MCP client**: use the full path to `uv` in the client config.
 
