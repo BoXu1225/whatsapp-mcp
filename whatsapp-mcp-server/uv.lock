@@ -514,10 +514,9 @@ wheels = [
 
 [[package]]
 name = "whatsapp-mcp-server"
-version = "0.1.0"
+version = "0.2.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "httpx" },
     { name = "mcp", extra = ["cli"] },
     { name = "requests" },
 ]
@@ -530,7 +529,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "httpx", specifier = ">=0.28.1" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.6.0" },
     { name = "requests", specifier = ">=2.32.3" },
 ]
