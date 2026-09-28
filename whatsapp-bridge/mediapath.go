@@ -7,14 +7,18 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // maxMediaFilenameBytes caps sanitised filenames (most filesystems allow 255).
 const maxMediaFilenameBytes = 200
 
 // safeMediaFilename reduces a sender-provided filename to its last path
-// element, treating both / and \ as separators. It reports false for names
-// that are empty, ".", "..", a bare separator or contain NUL.
+// element, treating both / and \ as separators, replaces control characters
+// with "_" and caps it at maxMediaFilenameBytes (keeping the extension). It
+// reports false for names that are empty, ".", "..", a bare separator or
+// contain NUL.
 func safeMediaFilename(name string) (string, bool) {
 	if strings.ContainsRune(name, 0) {
 		return "", false
@@ -27,7 +31,33 @@ func safeMediaFilename(name string) (string, bool) {
 	if strings.ContainsAny(base, `/\`) {
 		return "", false
 	}
-	return base, true
+	// Control characters (newlines, ESC, ...) would let a sender forge log
+	// lines or terminal output wherever the name is printed.
+	base = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '_'
+		}
+		return r
+	}, base)
+	return truncateFilename(base, maxMediaFilenameBytes), true
+}
+
+// truncateFilename cuts name to at most max bytes, keeping a short extension
+// and never splitting a UTF-8 sequence.
+func truncateFilename(name string, max int) string {
+	if len(name) <= max {
+		return name
+	}
+	ext := path.Ext(name)
+	if len(ext) > 16 || len(ext) == len(name) {
+		ext = ""
+	}
+	stem := name[:len(name)-len(ext)]
+	stem = stem[:max-len(ext)]
+	for !utf8.ValidString(stem) {
+		stem = stem[:len(stem)-1]
+	}
+	return stem + ext
 }
 
 // chatDirName turns a chat JID into a single directory name ("@" and "." are
