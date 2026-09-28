@@ -765,24 +765,24 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
             result = response.json()
             if result.get("success", False):
                 path = result.get("path")
-                print(f"Media downloaded successfully: {path}")
+                print(f"Media downloaded successfully: {path}", file=sys.stderr)
                 return path
             else:
-                print(f"Download failed: {result.get('message', 'Unknown error')}")
+                print(f"Download failed: {result.get('message', 'Unknown error')}", file=sys.stderr)
                 return None
         else:
-            print(f"Error: HTTP {response.status_code} - {response.text}")
+            print(f"Error: HTTP {response.status_code} - {response.text}", file=sys.stderr)
             return None
             
     except BridgeTokenError as e:
         print(str(e), file=sys.stderr)  # stdout is the MCP stdio transport
         return None
     except requests.RequestException as e:
-        print(f"Request error: {str(e)}")
+        print(f"Request error: {str(e)}", file=sys.stderr)
         return None
     except json.JSONDecodeError:
-        print(f"Error parsing response: {response.text}")
+        print(f"Error parsing response: {response.text}", file=sys.stderr)
         return None
     except Exception as e:
-        print(f"Unexpected error: {str(e)}")
+        print(f"Unexpected error: {str(e)}", file=sys.stderr)
         return None
