@@ -49,13 +49,21 @@ type apiServer struct {
 	port  int    // port the listener is bound to; the Host header must match
 
 	allowedDirs []string // media_path must resolve inside one of these
+
+	// /api/health state. isConnected and isLoggedIn default to asking client
+	// (false while it is nil); tests replace them.
+	health      *bridgeHealth
+	isConnected func() bool
+	isLoggedIn  func() bool
 }
 
 func newAPIServer(client *whatsmeow.Client, messageStore *MessageStore) *apiServer {
-	s := &apiServer{client: client, store: messageStore}
+	s := &apiServer{client: client, store: messageStore, health: newBridgeHealth(time.Now())}
 	s.send = func(recipient, message, mediaPath string, mediaData []byte) (bool, string) {
 		return sendWhatsAppMessage(s.client, recipient, message, mediaPath, mediaData)
 	}
+	s.isConnected = func() bool { return s.client != nil && s.client.IsConnected() }
+	s.isLoggedIn = func() bool { return s.client != nil && s.client.IsLoggedIn() }
 	return s
 }
 
@@ -64,6 +72,7 @@ func (s *apiServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/send", s.handleSend)
 	mux.HandleFunc("/api/download", s.handleDownload)
+	mux.HandleFunc("/api/health", s.handleHealth)
 	return s.guard(mux)
 }
 

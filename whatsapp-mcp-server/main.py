@@ -1,7 +1,10 @@
+import functools
+import inspect
 from typing import Any, Dict, List, Optional, Tuple
 
 from mcp.server.fastmcp import FastMCP
 
+import status
 from contacts import Recipient
 from whatsapp import (
     WhatsAppDBError,
@@ -23,6 +26,43 @@ from whatsapp import (
 
 # Initialize FastMCP server
 mcp = FastMCP("whatsapp")
+
+
+def _with_freshness(fn):
+    """Put a one-line bridge/data freshness header on a list tool's output (#7).
+
+    Text output gets it as the first line; list output as the first item.
+    The tool runs first, so its errors are raised unchanged.
+    """
+    returns_text = inspect.signature(fn).return_annotation is str
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        result = fn(*args, **kwargs)
+        header = status.freshness_header()
+        if returns_text:
+            return f"{header}\n{result}"
+        return [header, *result]
+
+    if not returns_text:
+        wrapper.__signature__ = inspect.signature(fn).replace(return_annotation=List[Any])
+        wrapper.__annotations__ = {**fn.__annotations__, "return": List[Any]}
+    return wrapper
+
+
+@mcp.tool()
+def get_status() -> Dict[str, Any]:
+    """Check whether the WhatsApp bridge is running and how fresh the stored messages are.
+
+    Call this when results look stale or empty, or before relying on "no new messages".
+    Returns bridge ("up", "disconnected", "logged_out", "down" or "error"), connected,
+    logged_in, last_event (last WhatsApp event the bridge saw), started_at, version,
+    newest_message (newest stored message), db_modified (last database write) and a
+    one-sentence summary. When the bridge is down, nothing newer than newest_message
+    is available.
+    """
+    return status.get_status()
+
 
 @mcp.tool()
 def search_contacts(query: str, limit: int = 50) -> Dict[str, Any]:
@@ -50,6 +90,7 @@ def search_contacts(query: str, limit: int = 50) -> Dict[str, Any]:
     return result
 
 @mcp.tool()
+@_with_freshness
 def list_messages(
     after: Optional[str] = None,
     before: Optional[str] = None,
@@ -66,7 +107,8 @@ def list_messages(
 ) -> str:
     """Get WhatsApp messages matching specified criteria with optional context.
 
-    Output is one line per message, oldest first, each message once:
+    The first line says whether the bridge is up and how fresh the data is.
+    Then one line per message, oldest first, each message once:
       [time] Chat: <name> (<chat JID>) | ID: <message ID> | From: <sender name or Me>: <text>
     Media messages start with a [type] or [type: filename] tag; pass the ID and chat JID to download_media.
     limit/page select the newest matches (page 0 = most recent), printed oldest to newest.
@@ -104,6 +146,7 @@ def list_messages(
     return messages
 
 @mcp.tool()
+@_with_freshness
 def list_chats(
     query: Optional[str] = None,
     limit: int = 20,
@@ -112,6 +155,8 @@ def list_chats(
     sort_by: str = "last_active"
 ) -> List[Dict[str, Any]]:
     """Get WhatsApp chats matching specified criteria.
+
+    The first item is a one-line bridge/data freshness header; the chats follow.
 
     Each chat's last message is its newest stored message (last_message, last_message_id,
     last_sender_name, last_is_from_me). Database errors are reported as tool errors.
@@ -133,12 +178,15 @@ def list_chats(
     return chats
 
 @mcp.tool()
+@_with_freshness
 def list_awaiting_reply(
     since: Optional[str] = None,
     include_groups: bool = False,
     limit: int = 20,
 ) -> List[Dict[str, Any]]:
     """List chats waiting for the user's reply: the newest message is not from the user. Newest first.
+
+    The first item is a one-line bridge/data freshness header; the chats follow.
 
     Each result has jid, name, last_message (preview; media as [type: filename]),
     last_message_id, last_message_at, last_sender and last_sender_name.
