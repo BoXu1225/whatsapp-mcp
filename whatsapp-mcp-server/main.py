@@ -112,6 +112,9 @@ def list_messages(
     Then one line per message, oldest first, each message once:
       [local time with UTC offset] Chat: <name> (<chat JID>) | ID: <message ID> | From: <sender name or Me>: <text>
     Media messages start with a [type] or [type: filename] tag; pass the ID and chat JID to download_media.
+    Replies start with [↪ reply to <message ID>]; messages deleted for everyone with [deleted];
+    edited ones end with (edited); reactions follow as [reactions: 👍×2 ❤️×1].
+    Locations, contacts and polls appear as [location lat,lng name], [contact Name], [poll] question: a / b.
     limit/page select the newest matches (page 0 = most recent), printed oldest to newest.
     With context, lines starting with '>>' are the matches and the others are context.
     
@@ -129,7 +132,7 @@ def list_messages(
         context_before: Number of messages to include before each match (default 1)
         context_after: Number of messages to include after each match (default 1)
         media_only: Only return media messages (images, videos, audio, documents, stickers)
-        media_type: Only return media of this type, e.g. "image", "video", "audio", "document"
+        media_type: Only return media of this type, e.g. "image", "video", "audio", "document", "sticker"
     """
     messages = whatsapp_list_messages(
         after=after,
@@ -255,6 +258,9 @@ def get_message_context(
     chat_jid: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Get context around a specific WhatsApp message. `before` and `after` are oldest first.
+
+    Each message has reply_to (ID of the quoted message or null), edited, deleted
+    (deleted for everyone) and reactions ({emoji: count}).
 
     Args:
         message_id: The ID of the message to get context for

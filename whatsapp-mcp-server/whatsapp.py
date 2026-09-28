@@ -3,9 +3,9 @@ import os.path
 import sqlite3
 import sys
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import requests
 
@@ -149,6 +149,10 @@ class Message:
     media_type: Optional[str] = None
     filename: Optional[str] = None
     sender_name: Optional[str] = None
+    reply_to: Optional[str] = None  # ID of the quoted message (#15)
+    edited: bool = False  # the text was edited after sending (#16)
+    deleted: bool = False  # deleted for everyone (#16); the text is kept unless the bridge runs with -purge-deleted
+    reactions: Dict[str, int] = field(default_factory=dict)  # emoji -> count, most frequent first (#15)
 
 @dataclass
 class Chat:
@@ -209,6 +213,26 @@ def _content_text(content: Optional[str], media_type: Optional[str], filename: O
     return f"{tag} {content}" if content else tag
 
 
+def _reactions_text(reactions: Dict[str, int]) -> str:
+    """'👍×2 ❤️×1' for {'👍': 2, '❤️': 1}."""
+    return " ".join(f"{emoji}×{count}" for emoji, count in reactions.items())
+
+
+def _decorated_content(message: Message) -> str:
+    """Message text with its media tag and capture markers:
+    '[↪ reply to <id>] ', '[deleted] ', ' (edited)' and ' [reactions: 👍×2]'."""
+    content = _content_text(message.content, message.media_type, message.filename)
+    if message.deleted:
+        content = f"[deleted] {content}" if content else "[deleted]"
+    if message.reply_to:
+        content = f"[↪ reply to {message.reply_to}] {content}"
+    if message.edited and not message.deleted:
+        content += " (edited)"
+    if message.reactions:
+        content += f" [reactions: {_reactions_text(message.reactions)}]"
+    return content
+
+
 def format_message(message: Message, show_chat_info: bool = True, directory: Optional[contacts.Directory] = None, marker: str = "") -> str:
     """Format a single message as one line: time, chat, message ID, sender, content.
 
@@ -222,7 +246,7 @@ def format_message(message: Message, show_chat_info: bool = True, directory: Opt
     else:
         sender_name = message.sender_name or get_sender_name(message.sender, directory)
     chat = f"{message.chat_name} ({message.chat_jid})" if message.chat_name else message.chat_jid
-    content = _content_text(message.content, message.media_type, message.filename)
+    content = _decorated_content(message)
     return (
         f"{marker}[{message.timestamp.isoformat(' ', 'seconds')}] Chat: {chat} | ID: {message.id} | "
         f"From: {sender_name}: {content}\n"
@@ -260,10 +284,28 @@ _MESSAGE_COLUMNS = (
     "m.timestamp, m.sender, c.name, m.content, m.is_from_me, m.chat_jid, m.id, m.media_type, m.filename, m.rowid"
 )
 _MESSAGE_FROM = "FROM messages m JOIN chats c ON m.chat_jid = c.jid"
+# Columns added by the bridge's migration 5 (#15, #16), and stand-ins for a
+# database an older bridge hasn't migrated yet.
+_CAPTURE_COLUMNS = ", m.reply_to, m.edited_at IS NOT NULL, COALESCE(m.is_deleted, 0)"
+_NO_CAPTURE_COLUMNS = ", NULL, 0, 0"
+
+
+def _has_capture_schema(conn: sqlite3.Connection) -> bool:
+    """Whether messages.db has migration 5's columns and reactions table."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    if not {"reply_to", "edited_at", "is_deleted"} <= cols:
+        return False
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'reactions'").fetchone() is not None
+
+
+def _message_columns(conn: sqlite3.Connection) -> str:
+    """SELECT list for _message_from_row."""
+    return _MESSAGE_COLUMNS + (_CAPTURE_COLUMNS if _has_capture_schema(conn) else _NO_CAPTURE_COLUMNS)
 
 
 def _message_from_row(row: tuple, directory: contacts.Directory) -> Message:
-    timestamp, sender, chat_name, content, is_from_me, chat_jid, msg_id, media_type, filename, _rowid = row
+    timestamp, sender, chat_name, content, is_from_me, chat_jid, msg_id, media_type, filename, _rowid = row[:10]
+    reply_to, edited, deleted = row[10:13] if len(row) >= 13 else (None, 0, 0)
     return Message(
         timestamp=_parse_db_time(timestamp),
         sender=sender,
@@ -275,7 +317,32 @@ def _message_from_row(row: tuple, directory: contacts.Directory) -> Message:
         media_type=media_type or None,
         filename=filename or None,
         sender_name="Me" if is_from_me else (directory.name_for(sender) or sender),
+        reply_to=reply_to or None,
+        edited=bool(edited),
+        deleted=bool(deleted),
     )
+
+
+def _attach_reactions(conn: sqlite3.Connection, messages: List[Message]) -> List[Message]:
+    """Fill each message's reactions (emoji -> count, most frequent first)."""
+    if not messages or not _has_capture_schema(conn):
+        return messages
+    by_chat: Dict[str, Dict[str, Message]] = {}
+    for m in messages:
+        by_chat.setdefault(m.chat_jid, {})[m.id] = m
+    for chat_jid, msgs in by_chat.items():
+        ids = list(msgs)
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            rows = conn.execute(
+                f"SELECT message_id, emoji, COUNT(*) AS n, MIN(timestamp) AS first FROM reactions"
+                f" WHERE chat_jid = ? AND message_id IN ({', '.join('?' * len(chunk))})"
+                " GROUP BY message_id, emoji ORDER BY message_id, n DESC, first, emoji",
+                (chat_jid, *chunk),
+            ).fetchall()
+            for msg_id, emoji, count, _first in rows:
+                msgs[msg_id].reactions[emoji] = count
+    return messages
 
 
 def _neighbours(conn: sqlite3.Connection, row: tuple, count: int, direction: str) -> List[tuple]:
@@ -291,7 +358,7 @@ def _neighbours(conn: sqlite3.Connection, row: tuple, count: int, direction: str
     else:
         cond, order = "(m.timestamp > ? OR (m.timestamp = ? AND m.rowid > ?))", "ASC"
     rows = conn.execute(
-        f"SELECT {_MESSAGE_COLUMNS} {_MESSAGE_FROM} WHERE m.chat_jid = ? AND {cond}"
+        f"SELECT {_message_columns(conn)} {_MESSAGE_FROM} WHERE m.chat_jid = ? AND {cond}"
         f" ORDER BY m.timestamp {order}, m.rowid {order} LIMIT ?",
         (chat_jid, timestamp, timestamp, rowid, count),
     ).fetchall()
@@ -390,7 +457,7 @@ def list_messages(
 
         where = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
         matches = conn.execute(
-            f"SELECT {_MESSAGE_COLUMNS} {_MESSAGE_FROM} {where}"
+            f"SELECT {_message_columns(conn)} {_MESSAGE_FROM} {where}"
             " ORDER BY m.timestamp DESC, m.rowid DESC LIMIT ? OFFSET ?",
             (*params, limit, page * limit),
         ).fetchall()
@@ -402,7 +469,7 @@ def list_messages(
                     rows.setdefault((r[5], r[6]), r)
 
         ordered = sorted(rows.values(), key=lambda r: (r[0], r[9]))
-        messages = [_message_from_row(r, directory) for r in ordered]
+        messages = _attach_reactions(conn, [_message_from_row(r, directory) for r in ordered])
         matched = {(r[5], r[6]) for r in matches} if include_context else None
         return format_messages_list(messages, directory=directory, matched_ids=matched)
 
@@ -419,7 +486,7 @@ def get_message_context(
     """
     with _connect() as conn:
         directory = load_directory(conn)
-        sql = f"SELECT {_MESSAGE_COLUMNS} {_MESSAGE_FROM} WHERE m.id = ?"
+        sql = f"SELECT {_message_columns(conn)} {_MESSAGE_FROM} WHERE m.id = ?"
         params: tuple = (message_id,)
         if chat_jid:
             sql += " AND m.chat_jid = ?"
@@ -428,11 +495,13 @@ def get_message_context(
         if not target:
             raise ValueError(f"Message with ID {message_id} not found")
 
-        return MessageContext(
+        context = MessageContext(
             message=_message_from_row(target, directory),
             before=[_message_from_row(r, directory) for r in _neighbours(conn, target, before, "before")],
             after=[_message_from_row(r, directory) for r in _neighbours(conn, target, after, "after")],
         )
+        _attach_reactions(conn, [context.message, *context.before, *context.after])
+        return context
 
 
 def _escape_like(text: str) -> str:
@@ -572,7 +641,7 @@ def get_last_interaction(jid: str) -> Optional[str]:
         sender_ids = directory.sender_ids(jid)
         row = conn.execute(
             f"""
-            SELECT {_MESSAGE_COLUMNS} {_MESSAGE_FROM}
+            SELECT {_message_columns(conn)} {_MESSAGE_FROM}
             WHERE m.chat_jid IN ({', '.join('?' * len(chat_jids))})
                OR m.sender IN ({', '.join('?' * len(sender_ids))})
             ORDER BY m.timestamp DESC, m.rowid DESC
@@ -582,11 +651,14 @@ def get_last_interaction(jid: str) -> Optional[str]:
         ).fetchone()
         if not row:
             return None
-        return format_message(_message_from_row(row, directory), directory=directory)
+        message = _attach_reactions(conn, [_message_from_row(row, directory)])[0]
+        return format_message(message, directory=directory)
 
 
 def list_awaiting_reply(since: Optional[str] = None, include_groups: bool = False, limit: int = 20) -> List[Chat]:
     """Chats whose newest stored message is not from me, newest first.
+
+    Messages deleted for everyone are skipped when finding the newest one.
 
     Direct chats (phone and LID JIDs) only, plus groups with include_groups.
     Broadcasts and newsletters are never included. `since` (ISO-8601) keeps
@@ -602,12 +674,15 @@ def list_awaiting_reply(since: Optional[str] = None, include_groups: bool = Fals
 
     with _connect() as conn:
         directory = load_directory(conn)
+        # A message deleted for everyone doesn't need a reply: rank the others.
+        not_deleted = "WHERE COALESCE(is_deleted, 0) = 0" if _has_capture_schema(conn) else ""
         rows = conn.execute(
             f"""
             WITH ranked AS (
                 SELECT rowid AS rid,
                        ROW_NUMBER() OVER (PARTITION BY chat_jid ORDER BY timestamp DESC, rowid DESC) AS rn
                 FROM messages
+                {not_deleted}
             )
             SELECT c.jid, c.name, c.last_message_time,
                    lm.content, lm.sender, lm.is_from_me, lm.id, lm.timestamp, lm.media_type, lm.filename
