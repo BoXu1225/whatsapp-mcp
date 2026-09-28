@@ -108,14 +108,19 @@ class WhatsAppDBError(RuntimeError):
     """A query against the bridge's messages database failed."""
 
 
-@contextmanager
-def _connect():
-    """Open messages.db; turn sqlite errors into WhatsAppDBError with a clear message."""
+def _open_messages_db() -> sqlite3.Connection:
+    """Connect to messages.db without creating it if it's missing."""
     if not os.path.isfile(MESSAGES_DB_PATH):
         raise WhatsAppDBError(
             f"WhatsApp messages database not found at {MESSAGES_DB_PATH}. Is the bridge set up and has it synced?"
         )
-    conn = sqlite3.connect(MESSAGES_DB_PATH)
+    return sqlite3.connect(MESSAGES_DB_PATH)
+
+
+@contextmanager
+def _connect():
+    """Open messages.db; turn sqlite errors into WhatsAppDBError with a clear message."""
+    conn = _open_messages_db()
     try:
         yield conn
     except sqlite3.Error as e:
@@ -151,6 +156,8 @@ class Chat:
     last_message: Optional[str] = None
     last_sender: Optional[str] = None
     last_is_from_me: Optional[bool] = None
+    last_message_id: Optional[str] = None
+    last_sender_name: Optional[str] = None
 
     @property
     def is_group(self) -> bool:
@@ -203,11 +210,8 @@ def format_message(message: Message, show_chat_info: bool = True, directory: Opt
     if hasattr(message, 'media_type') and message.media_type:
         content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
     
-    try:
-        sender_name = get_sender_name(message.sender, directory) if not message.is_from_me else "Me"
-        output += f"From: {sender_name}: {content_prefix}{message.content}\n"
-    except Exception as e:
-        print(f"Error formatting message: {e}")
+    sender_name = get_sender_name(message.sender, directory) if not message.is_from_me else "Me"
+    output += f"From: {sender_name}: {content_prefix}{message.content}\n"
     return output
 
 def format_messages_list(messages: List[Message], show_chat_info: bool = True, directory: Optional[contacts.Directory] = None) -> str:
@@ -236,7 +240,7 @@ def list_messages(
 ) -> List[Message]:
     """Get messages matching the specified criteria with optional context."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _open_messages_db()
         cursor = conn.cursor()
         
         # Build base query
@@ -319,8 +323,7 @@ def list_messages(
         return format_messages_list(result, show_chat_info=True)    
         
     except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        return []
+        raise WhatsAppDBError(f"WhatsApp database query failed: {e}") from e
     finally:
         if 'conn' in locals():
             conn.close()
@@ -333,7 +336,7 @@ def get_message_context(
 ) -> MessageContext:
     """Get context around a specific message."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _open_messages_db()
         cursor = conn.cursor()
         
         # Get the target message first
@@ -412,8 +415,7 @@ def get_message_context(
         )
         
     except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        raise
+        raise WhatsAppDBError(f"WhatsApp database query failed: {e}") from e
     finally:
         if 'conn' in locals():
             conn.close()
@@ -426,71 +428,22 @@ def list_chats(
     include_last_message: bool = True,
     sort_by: str = "last_active"
 ) -> List[Chat]:
-    """Get chats matching the specified criteria."""
-    try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
-        cursor = conn.cursor()
-        
-        # Build base query
-        query_parts = ["""
-            SELECT 
-                chats.jid,
-                chats.name,
-                chats.last_message_time,
-                messages.content as last_message,
-                messages.sender as last_sender,
-                messages.is_from_me as last_is_from_me
-            FROM chats
-        """]
-        
-        if include_last_message:
-            query_parts.append("""
-                LEFT JOIN messages ON chats.jid = messages.chat_jid 
-                AND chats.last_message_time = messages.timestamp
-            """)
-            
-        where_clauses = []
-        params = []
-        
+    """Get chats matching the specified criteria.
+
+    The last message is the newest stored message in each chat. Raises
+    WhatsAppDBError if the database can't be queried.
+    """
+    with _connect() as conn:
+        directory = load_directory(conn)
+        where, params = "", ()
         if query:
-            where_clauses.append("(LOWER(chats.name) LIKE LOWER(?) OR chats.jid LIKE ?)")
-            params.extend([f"%{query}%", f"%{query}%"])
-            
-        if where_clauses:
-            query_parts.append("WHERE " + " AND ".join(where_clauses))
-            
-        # Add sorting
-        order_by = "chats.last_message_time DESC" if sort_by == "last_active" else "chats.name"
-        query_parts.append(f"ORDER BY {order_by}")
-        
-        # Add pagination
-        offset = (page ) * limit
-        query_parts.append("LIMIT ? OFFSET ?")
-        params.extend([limit, offset])
-        
-        cursor.execute(" ".join(query_parts), tuple(params))
-        chats = cursor.fetchall()
-        
-        result = []
-        for chat_data in chats:
-            chat = Chat(
-                jid=chat_data[0],
-                name=chat_data[1],
-                last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-                last_message=chat_data[3],
-                last_sender=chat_data[4],
-                last_is_from_me=chat_data[5]
-            )
-            result.append(chat)
-            
-        return result
-        
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        return []
-    finally:
-        if 'conn' in locals():
-            conn.close()
+            where = "WHERE (LOWER(name) LIKE LOWER(?) OR jid LIKE ?)"
+            params = (f"%{query}%", f"%{query}%")
+        order = "last_message_time DESC" if sort_by == "last_active" else "name"
+        return _fetch_chats(
+            conn, directory, where, params, order=order, limit=limit, offset=page * limit,
+            include_last_message=include_last_message,
+        )
 
 
 def search_contacts(query: str) -> List[Contact]:
@@ -548,6 +501,9 @@ def _fetch_chats(
 
 def _chat_from_row(row: tuple, directory: contacts.Directory) -> Chat:
     jid, name, last_time, content, sender, is_from_me, msg_id, msg_time, media_type, filename = row
+    last_sender_name = None
+    if msg_id is not None:
+        last_sender_name = "Me" if is_from_me else (directory.name_for(sender) or sender)
     return Chat(
         jid=jid,
         name=directory.chat_display_name(jid, name),
@@ -555,6 +511,8 @@ def _chat_from_row(row: tuple, directory: contacts.Directory) -> Chat:
         last_message=content,
         last_sender=sender,
         last_is_from_me=bool(is_from_me) if is_from_me is not None else None,
+        last_message_id=msg_id,
+        last_sender_name=last_sender_name,
     )
 
 
@@ -613,51 +571,11 @@ def get_last_interaction(jid: str) -> Optional[str]:
 
 
 def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]:
-    """Get chat metadata by JID."""
-    try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
-        cursor = conn.cursor()
-        
-        query = """
-            SELECT 
-                c.jid,
-                c.name,
-                c.last_message_time,
-                m.content as last_message,
-                m.sender as last_sender,
-                m.is_from_me as last_is_from_me
-            FROM chats c
-        """
-        
-        if include_last_message:
-            query += """
-                LEFT JOIN messages m ON c.jid = m.chat_jid 
-                AND c.last_message_time = m.timestamp
-            """
-            
-        query += " WHERE c.jid = ?"
-        
-        cursor.execute(query, (chat_jid,))
-        chat_data = cursor.fetchone()
-        
-        if not chat_data:
-            return None
-            
-        return Chat(
-            jid=chat_data[0],
-            name=chat_data[1],
-            last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-            last_message=chat_data[3],
-            last_sender=chat_data[4],
-            last_is_from_me=chat_data[5]
-        )
-        
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        return None
-    finally:
-        if 'conn' in locals():
-            conn.close()
+    """Get chat metadata by JID; None if there is no such chat."""
+    with _connect() as conn:
+        directory = load_directory(conn)
+        chats = _fetch_chats(conn, directory, "WHERE jid = ?", (chat_jid,), limit=1, include_last_message=include_last_message)
+        return chats[0] if chats else None
 
 
 def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:

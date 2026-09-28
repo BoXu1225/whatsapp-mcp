@@ -87,8 +87,11 @@ def test_whatsmeow_fixture(whatsmeow_db):
 
 
 def test_default_db_path_is_isolated(tmp_path):
+    import pytest
+
     assert whatsapp.MESSAGES_DB_PATH == str(tmp_path / "missing" / "messages.db")
-    assert whatsapp.list_chats() == []
+    with pytest.raises(whatsapp.WhatsAppDBError):
+        whatsapp.list_chats()
 
 
 def test_http_is_blocked():
