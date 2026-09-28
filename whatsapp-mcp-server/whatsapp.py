@@ -12,6 +12,45 @@ import audio
 MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
 WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
 
+# The bridge writes a random token to <store>/bridge_token on start and rejects
+# /api/* requests that don't carry it (see whatsapp-bridge/security.go).
+BRIDGE_TOKEN_FILE = "bridge_token"
+BRIDGE_TOKEN_HEADER = "X-Bridge-Token"
+BRIDGE_TIMEOUT = (5, 120)  # (connect, read) seconds; sends upload media before replying
+
+
+class BridgeTokenError(RuntimeError):
+    """The bridge API token could not be read."""
+
+
+def _bridge_store_dir() -> str:
+    """The bridge's store directory: the one holding messages.db."""
+    return os.path.dirname(os.path.abspath(MESSAGES_DB_PATH))
+
+
+def _bridge_headers() -> dict:
+    """Headers for a bridge API call. Reads the token now, so a bridge restart
+    that rotates it is picked up without restarting the MCP server."""
+    path = os.path.join(_bridge_store_dir(), BRIDGE_TOKEN_FILE)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            token = fh.read().strip()
+    except FileNotFoundError:
+        raise BridgeTokenError(
+            f"Bridge API token not found at {path}. Start (or rebuild and restart) the WhatsApp bridge; it creates this file on start."
+        ) from None
+    except OSError as e:
+        raise BridgeTokenError(f"Could not read bridge API token at {path}: {e}") from None
+    if not token:
+        raise BridgeTokenError(f"Bridge API token file {path} is empty. Restart the WhatsApp bridge to regenerate it.")
+    return {BRIDGE_TOKEN_HEADER: token}
+
+
+def _bridge_post(endpoint: str, payload: dict) -> requests.Response:
+    """POST JSON to the bridge API with the token header and a timeout."""
+    return requests.post(f"{WHATSAPP_API_BASE_URL}/{endpoint}", json=payload, headers=_bridge_headers(), timeout=BRIDGE_TIMEOUT)
+
+
 @dataclass
 class Message:
     timestamp: datetime
@@ -630,13 +669,12 @@ def send_message(recipient: str, message: str) -> Tuple[bool, str]:
         if not recipient:
             return False, "Recipient must be provided"
         
-        url = f"{WHATSAPP_API_BASE_URL}/send"
         payload = {
             "recipient": recipient,
             "message": message,
         }
-        
-        response = requests.post(url, json=payload)
+
+        response = _bridge_post("send", payload)
         
         # Check if the request was successful
         if response.status_code == 200:
@@ -645,6 +683,8 @@ def send_message(recipient: str, message: str) -> Tuple[bool, str]:
         else:
             return False, f"Error: HTTP {response.status_code} - {response.text}"
             
+    except BridgeTokenError as e:
+        return False, str(e)
     except requests.RequestException as e:
         return False, f"Request error: {str(e)}"
     except json.JSONDecodeError:
@@ -664,13 +704,12 @@ def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
         if not os.path.isfile(media_path):
             return False, f"Media file not found: {media_path}"
         
-        url = f"{WHATSAPP_API_BASE_URL}/send"
         payload = {
             "recipient": recipient,
             "media_path": media_path
         }
-        
-        response = requests.post(url, json=payload)
+
+        response = _bridge_post("send", payload)
         
         # Check if the request was successful
         if response.status_code == 200:
@@ -679,6 +718,8 @@ def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
         else:
             return False, f"Error: HTTP {response.status_code} - {response.text}"
             
+    except BridgeTokenError as e:
+        return False, str(e)
     except requests.RequestException as e:
         return False, f"Request error: {str(e)}"
     except json.JSONDecodeError:
@@ -704,13 +745,12 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
             except Exception as e:
                 return False, f"Error converting file to opus ogg. You likely need to install ffmpeg: {str(e)}"
         
-        url = f"{WHATSAPP_API_BASE_URL}/send"
         payload = {
             "recipient": recipient,
             "media_path": media_path
         }
-        
-        response = requests.post(url, json=payload)
+
+        response = _bridge_post("send", payload)
         
         # Check if the request was successful
         if response.status_code == 200:
@@ -719,6 +759,8 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
         else:
             return False, f"Error: HTTP {response.status_code} - {response.text}"
             
+    except BridgeTokenError as e:
+        return False, str(e)
     except requests.RequestException as e:
         return False, f"Request error: {str(e)}"
     except json.JSONDecodeError:
@@ -737,13 +779,12 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
         The local file path if download was successful, None otherwise
     """
     try:
-        url = f"{WHATSAPP_API_BASE_URL}/download"
         payload = {
             "message_id": message_id,
             "chat_jid": chat_jid
         }
-        
-        response = requests.post(url, json=payload)
+
+        response = _bridge_post("download", payload)
         
         if response.status_code == 200:
             result = response.json()
@@ -758,6 +799,9 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
             print(f"Error: HTTP {response.status_code} - {response.text}")
             return None
             
+    except BridgeTokenError as e:
+        print(str(e))
+        return None
     except requests.RequestException as e:
         print(f"Request error: {str(e)}")
         return None
