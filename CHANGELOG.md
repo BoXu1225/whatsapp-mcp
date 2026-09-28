@@ -51,7 +51,9 @@ which this fork started from.
   from the time of storing, which collided for media stored in the same
   second. `download_media` also returns `original_filename`. Files saved
   under old names are still found, and only used if their SHA-256 matches
-  (#19).
+  (#19). Stickers download as `<ID>.webp`. A message ID with characters
+  other than letters, digits, `-` and `_` gets them replaced and a short
+  hash of the ID appended, so two IDs never share a file.
 - Downloads use the stored `direct_path` and fall back to the path in the URL
   (#19).
 - The bridge exits with status 1 when WhatsApp logs it out (with how to
@@ -83,6 +85,23 @@ which this fork started from.
   other person uses the chat's JID. Your own messages use your LID in LID
   chats and your phone JID elsewhere. The MCP server reads old bare-number
   senders too (#8).
+
+- `scripts/bridge.sh start` waits up to 70 s until the bridge is connected
+  (via `health`) and exits 1 with the last log lines if it exits, doesn't
+  connect or needs a QR scan; `status` shows the last log lines when the
+  bridge isn't running.
+- The migration-5 and -6 columns are added at start while those migrations
+  still wait for login; backups before a migration run are named after the
+  version below the first pending migration.
+
+### Known limitations
+
+- Pending media retries are kept in memory only: after a bridge restart,
+  the phone's answer to an earlier retry request is ignored, and the next
+  `download_media` call sends a new request.
+- Shutdown disconnects from WhatsApp and then closes `messages.db` without
+  waiting for an event handler that is still running; a message being
+  stored at that moment fails and, not acknowledged, is redelivered later.
 
 ### Removed
 
