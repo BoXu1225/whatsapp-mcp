@@ -130,7 +130,7 @@ Once connected, you can interact with your WhatsApp contacts through Claude, lev
 
 Claude can access the following tools to interact with WhatsApp:
 
-- **search_contacts**: Search contacts by name or number, including contacts you have no chat with. Returns separate `jid`, `phone`, `lid`, `name` and `chat_jid` fields; a LID is never reported as a phone number
+- **search_contacts**: Search contacts by name or number, including contacts you have no chat with. Returns `{contacts, total_matches, truncated}` (default `limit` 50, with a note when truncated); each contact has separate `jid`, `phone`, `lid`, `name` and `chat_jid` fields, and a LID is never reported as a phone number
 - **list_messages**: Retrieve messages with optional filters (date range, chat, sender, text, `media_only`, `media_type`) and context. One line per message, oldest first, each with chat name and JID, message ID and sender name. Context is off by default when `chat_jid` is set; with context, matches are marked `>>`
 - **list_chats**: List available chats with metadata and each chat's newest message
 - **list_awaiting_reply**: Chats whose newest message isn't from you, newest first (direct chats; groups with `include_groups=True`; optional `since`)
@@ -144,9 +144,31 @@ Claude can access the following tools to interact with WhatsApp:
 - **send_audio_message**: Send an audio file as a WhatsApp voice message (requires the file to be an .ogg opus file or ffmpeg must be installed)
 - **download_media**: Download media from a WhatsApp message and get the local file path
 
-The send tools resolve the recipient against your chats and contacts and pass the full JID to the bridge. A number that is a known LID is sent to its `@lid` JID. Recipients that aren't a known chat or contact are rejected unless `allow_unknown=true` is passed. The result includes `recipient_jid` and `recipient_name`. The tool descriptions tell the model to send only when you explicitly ask, after showing you the exact recipient and content.
+The send tools resolve the recipient against your chats and contacts and pass the full JID to the bridge. A known contact with a direct chat is sent to that chat. A number that is a known LID is sent to its `@lid` JID, and a bare number that is both a known phone number and a known LID is rejected as ambiguous (pass the full JID). Recipients that aren't a known chat or contact are rejected unless `allow_unknown=true` is passed. The result includes `recipient_jid` and `recipient_name`. The tool descriptions tell the model to send only when you explicitly ask, after showing you the exact recipient and content.
 
 Contact names and the phone-number/LID mapping come from the bridge's whatsmeow device store (`whatsapp-bridge/store/whatsapp.db`, next to `messages.db`; override with the `WHATSMEOW_DB_PATH` environment variable). It is opened read-only. Without it, the tools fall back to the chats table. Database errors are returned as tool errors rather than empty results.
+
+#### Breaking changes to tool output
+
+If you have prompts or scripts built on the earlier tool output, note:
+
+- `search_contacts` no longer returns `phone_number` (which held the LID for `@lid` chats). It returns `{contacts, total_matches, truncated}`, and each contact has `jid`, `phone`, `lid`, `name` and `chat_jid`.
+- `list_messages`:
+  - `include_context` defaults to off when `chat_jid` is set (on otherwise).
+  - The line format is now `[time] Chat: <name> (<jid>) | ID: <id> | From: <name or Me>: <text>`, oldest first, with no repeated messages. With context, matches are marked `>>`.
+  - `limit`/`page` select the newest matches, which are then printed oldest first.
+  - Media shows as `[type: filename] caption`.
+  - `%` and `_` in `query` match literally (the same holds for `list_chats`).
+- `get_message_context` returns `before` oldest first.
+- Chat objects:
+  - `last_message` is the chat's newest stored message, with media rendered as `[type: filename]`.
+  - New fields: `last_message_id`, `last_sender_name` and `last_message_at`.
+- Send tools:
+  - They reject recipients that aren't a known chat or contact unless `allow_unknown=true`.
+  - They reject ambiguous bare numbers.
+  - They may send to a contact's existing chat JID instead of the form you gave.
+  - Results add `recipient_jid` and `recipient_name`.
+- Database errors are returned as tool errors instead of empty results or `null`.
 
 ### Media Handling Features
 
