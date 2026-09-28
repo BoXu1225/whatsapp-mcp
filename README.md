@@ -130,18 +130,23 @@ Once connected, you can interact with your WhatsApp contacts through Claude, lev
 
 Claude can access the following tools to interact with WhatsApp:
 
-- **search_contacts**: Search for contacts by name or phone number
-- **list_messages**: Retrieve messages with optional filters and context
-- **list_chats**: List available chats with metadata
+- **search_contacts**: Search contacts by name or number, including contacts you have no chat with. Returns separate `jid`, `phone`, `lid`, `name` and `chat_jid` fields; a LID is never reported as a phone number
+- **list_messages**: Retrieve messages with optional filters (date range, chat, sender, text, `media_only`, `media_type`) and context. One line per message, oldest first, each with chat name and JID, message ID and sender name. Context is off by default when `chat_jid` is set; with context, matches are marked `>>`
+- **list_chats**: List available chats with metadata and each chat's newest message
+- **list_awaiting_reply**: Chats whose newest message isn't from you, newest first (direct chats; groups with `include_groups=True`; optional `since`)
 - **get_chat**: Get information about a specific chat
-- **get_direct_chat_by_contact**: Find a direct chat with a specific contact
-- **get_contact_chats**: List all chats involving a specific contact
+- **get_direct_chat_by_contact**: Find the direct chat with a contact by phone number, LID or JID (exact match; `+`, spaces and dashes are ignored)
+- **get_contact_chats**: List all chats involving a specific contact, each once
 - **get_last_interaction**: Get the most recent message with a contact
-- **get_message_context**: Retrieve context around a specific message
-- **send_message**: Send a WhatsApp message to a specified phone number or group JID
-- **send_file**: Send a file (image, video, raw audio, document) to a specified recipient
+- **get_message_context**: Retrieve context around a specific message (`before` and `after` oldest first)
+- **send_message**: Send a WhatsApp message to a person or group
+- **send_file**: Send a file (image, video, raw audio, document) to a person or group
 - **send_audio_message**: Send an audio file as a WhatsApp voice message (requires the file to be an .ogg opus file or ffmpeg must be installed)
 - **download_media**: Download media from a WhatsApp message and get the local file path
+
+The send tools resolve the recipient against your chats and contacts and pass the full JID to the bridge. A number that is a known LID is sent to its `@lid` JID. Recipients that aren't a known chat or contact are rejected unless `allow_unknown=true` is passed. The result includes `recipient_jid` and `recipient_name`. The tool descriptions tell the model to send only when you explicitly ask, after showing you the exact recipient and content.
+
+Contact names and the phone-number/LID mapping come from the bridge's whatsmeow device store (`whatsapp-bridge/store/whatsapp.db`, next to `messages.db`; override with the `WHATSMEOW_DB_PATH` environment variable). It is opened read-only. Without it, the tools fall back to the chats table. Database errors are returned as tool errors rather than empty results.
 
 ### Media Handling Features
 
