@@ -186,14 +186,20 @@ func (s *apiServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// startRESTServer listens on 127.0.0.1:port (0 picks a free port) and serves
-// the API in the background. It records the bound port on s, since the Host
-// check needs it.
-func startRESTServer(s *apiServer, port int) error {
+// listenREST binds the REST API to 127.0.0.1:port (0 picks a free port).
+// main calls it before connecting to WhatsApp, so a second bridge instance
+// fails here instead of taking over the first one's WhatsApp session.
+func listenREST(port int) (net.Listener, error) {
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
-		return fmt.Errorf("REST API listen: %w", err)
+		return nil, fmt.Errorf("REST API listen on 127.0.0.1:%d: %w", port, err)
 	}
+	return ln, nil
+}
+
+// serveREST serves the API on ln in the background. It records the bound
+// port on s, since the Host check needs it.
+func serveREST(s *apiServer, ln net.Listener) {
 	s.port = ln.Addr().(*net.TCPAddr).Port
 	fmt.Printf("Starting REST API server on %s...\n", ln.Addr())
 
@@ -203,5 +209,4 @@ func startRESTServer(s *apiServer, port int) error {
 			fmt.Printf("REST API server error: %v\n", err)
 		}
 	}()
-	return nil
 }
