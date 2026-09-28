@@ -1,8 +1,12 @@
 import functools
 import inspect
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from mcp.server.fastmcp import FastMCP
+import pydantic_core
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import TextContent
 
 import status
 from contacts import Recipient
@@ -25,8 +29,51 @@ from whatsapp import (
     send_message as whatsapp_send_message,
 )
 
-# Initialize FastMCP server
-mcp = FastMCP("whatsapp")
+mcp = MCPServer("whatsapp")
+
+
+def _content(result: Any) -> List[TextContent]:
+    """A tool's return value as text content blocks, the way mcp 1.x sent them.
+
+    None is no block, a list is one block per item, a str is sent as is and
+    anything else as compact JSON (json.dumps defaults, so non-ASCII is escaped).
+    mcp 2.x would pretty-print with indent=2 and keep non-ASCII (#36).
+    """
+    if result is None:
+        return []
+    if isinstance(result, (list, tuple)):
+        return [block for item in result for block in _content(item)]
+    if not isinstance(result, str):
+        try:
+            result = json.dumps(pydantic_core.to_jsonable_python(result))
+        except Exception:
+            result = str(result)
+    return [TextContent(type="text", text=result)]
+
+
+def tool(fn):
+    """Register `fn` as an MCP tool with the same wire format as under mcp 1.x (#36).
+
+    The name, description (docstring) and input schema come from `fn`. Results
+    are text content only (structured_output=False: no outputSchema and no
+    structuredContent), serialized by _content. An exception becomes an error
+    result "Error executing tool <name>: <error>"; mcp 2.x would drop the error
+    text for anything but a ToolError. `fn` itself is returned unchanged, so
+    it stays callable from Python with its normal return value.
+    """
+
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        try:
+            result = fn(*args, **kwargs)
+        except ToolError:
+            raise
+        except Exception as e:
+            raise ToolError(str(e)) from e
+        return _content(result)
+
+    mcp.tool(structured_output=False)(run)
+    return fn
 
 
 def _with_freshness(fn):
@@ -52,7 +99,7 @@ def _with_freshness(fn):
     return wrapper
 
 
-@mcp.tool()
+@tool
 def get_status() -> Dict[str, Any]:
     """Check whether the WhatsApp bridge is running and how fresh the stored messages are.
 
@@ -66,7 +113,7 @@ def get_status() -> Dict[str, Any]:
     return status.get_status()
 
 
-@mcp.tool()
+@tool
 def search_contacts(query: str, limit: int = 50) -> Dict[str, Any]:
     """Search WhatsApp contacts by name or number, including contacts you have no chat with.
 
@@ -91,7 +138,7 @@ def search_contacts(query: str, limit: int = 50) -> Dict[str, Any]:
         result["note"] = f"Showing {len(contacts)} of {total} matches. Refine the query or pass a higher limit."
     return result
 
-@mcp.tool()
+@tool
 @_with_freshness
 def list_messages(
     after: Optional[str] = None,
@@ -152,7 +199,7 @@ def list_messages(
     )
     return messages
 
-@mcp.tool()
+@tool
 @_with_freshness
 def list_chats(
     query: Optional[str] = None,
@@ -184,7 +231,7 @@ def list_chats(
     )
     return chats
 
-@mcp.tool()
+@tool
 @_with_freshness
 def list_awaiting_reply(
     since: Optional[str] = None,
@@ -206,7 +253,7 @@ def list_awaiting_reply(
     """
     return whatsapp_list_awaiting_reply(since=since, include_groups=include_groups, limit=limit)
 
-@mcp.tool()
+@tool
 def get_chat(chat_jid: str, include_last_message: bool = True) -> Dict[str, Any]:
     """Get WhatsApp chat metadata by JID.
     
@@ -217,7 +264,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Dict[str, Any]
     chat = whatsapp_get_chat(chat_jid, include_last_message)
     return chat
 
-@mcp.tool()
+@tool
 def get_direct_chat_by_contact(sender_phone_number: str) -> Dict[str, Any]:
     """Get the direct chat with a person, by phone number, LID or JID (exact match).
 
@@ -230,7 +277,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Dict[str, Any]:
     chat = whatsapp_get_direct_chat_by_contact(sender_phone_number)
     return chat
 
-@mcp.tool()
+@tool
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str, Any]]:
     """Get all WhatsApp chats involving the contact (their direct chat and groups they wrote in), each once.
 
@@ -242,7 +289,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str
     chats = whatsapp_get_contact_chats(jid, limit, page)
     return chats
 
-@mcp.tool()
+@tool
 def get_last_interaction(jid: str) -> str:
     """Get the most recent WhatsApp message involving the contact (in their chat, or sent by them anywhere).
 
@@ -252,7 +299,7 @@ def get_last_interaction(jid: str) -> str:
     message = whatsapp_get_last_interaction(jid)
     return message
 
-@mcp.tool()
+@tool
 def get_message_context(
     message_id: str,
     before: int = 5,
@@ -331,7 +378,7 @@ def _send_result(resolved: Recipient, success: bool, status_message: str) -> Dic
     }
 
 
-@mcp.tool()
+@tool
 @_with_doc(safety=SEND_SAFETY.format(what="message text"), recipient=RECIPIENT_ARG)
 def send_message(
     recipient: str,
@@ -356,7 +403,7 @@ def send_message(
     return _send_result(resolved, success, status_message)
 
 
-@mcp.tool()
+@tool
 @_with_doc(safety=SEND_SAFETY.format(what="file path"), recipient=RECIPIENT_ARG)
 def send_file(recipient: str, media_path: str, allow_unknown: bool = False) -> Dict[str, Any]:
     """Send a file such as a picture, raw audio, video or document via WhatsApp to a person or group.
@@ -377,7 +424,7 @@ def send_file(recipient: str, media_path: str, allow_unknown: bool = False) -> D
     return _send_result(resolved, success, status_message)
 
 
-@mcp.tool()
+@tool
 @_with_doc(safety=SEND_SAFETY.format(what="audio file path"), recipient=RECIPIENT_ARG)
 def send_audio_message(recipient: str, media_path: str, allow_unknown: bool = False) -> Dict[str, Any]:
     """Send any audio file as a WhatsApp voice message to a person or group. If it errors due to ffmpeg not being installed, use send_file instead.
@@ -398,7 +445,7 @@ def send_audio_message(recipient: str, media_path: str, allow_unknown: bool = Fa
     return _send_result(resolved, success, status_message)
 
 
-@mcp.tool()
+@tool
 def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
     """Download media from a WhatsApp message and get the local file path.
 
@@ -418,7 +465,7 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
     return whatsapp_download_media_result(message_id, chat_jid)
 
 
-@mcp.tool()
+@tool
 def request_history(chat_jid: str, count: int = 50) -> Dict[str, Any]:
     """Ask your phone for older messages of a chat than the bridge has stored.
 
@@ -444,5 +491,4 @@ def request_history(chat_jid: str, count: int = 50) -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
-    # Initialize and run the server
-    mcp.run(transport='stdio')
+    mcp.run(transport="stdio")
