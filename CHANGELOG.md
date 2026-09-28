@@ -21,8 +21,9 @@ Several tool outputs changed; see "Breaking changes to tool output" in the READM
   `logged_in`, `last_event`, `started_at`, `version`). When the bridge is down,
   `get_status` reports the newest stored message and the database's last write
   instead (#7).
-- `list_messages`, `list_chats` and `list_awaiting_reply` start with a one-line
-  header saying whether the bridge is up and how fresh the data is (#7).
+- A one-line header saying whether the bridge is up and how fresh the data is:
+  the first line of `list_messages`, and `status` in `list_chats` and
+  `list_awaiting_reply`, which now return `{"status", "chats"}` (#7).
 - `list_awaiting_reply` tool: chats whose newest message isn't from you (#22).
 - `media_only` and `media_type` filters for `list_messages` (#22).
 - `search_contacts` takes a `limit` and reports `total_matches` and `truncated`.

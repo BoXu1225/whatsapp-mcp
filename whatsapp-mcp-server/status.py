@@ -9,6 +9,7 @@ list tools.
 
 import os
 import sqlite3
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
@@ -16,7 +17,19 @@ import requests
 
 import whatsapp
 
-HEALTH_TIMEOUT = 2  # seconds
+HEALTH_TIMEOUT = 2  # seconds, for the get_status tool
+# The header runs on every list call: a hung bridge may cost at most
+# HEADER_TIMEOUT, and at most once per HEADER_CACHE_SECONDS.
+HEADER_TIMEOUT = 0.5
+HEADER_CACHE_SECONDS = 5.0
+
+_now = time.monotonic
+_header_cache: Optional[Tuple[str, float, str]] = None  # (db path, expires, header)
+
+
+def clear_header_cache() -> None:
+    global _header_cache
+    _header_cache = None
 
 
 def _utc(ts: Optional[float]) -> Optional[str]:
@@ -25,7 +38,7 @@ def _utc(ts: Optional[float]) -> Optional[str]:
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def bridge_health() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+def bridge_health(timeout: float = HEALTH_TIMEOUT) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """(health JSON, None) if the bridge answered, else (None, reason).
 
     The reason starts with "down:" when the bridge could not be reached and
@@ -36,7 +49,7 @@ def bridge_health() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     except whatsapp.BridgeTokenError as e:
         return None, f"down: {e}"
     try:
-        resp = requests.get(f"{whatsapp.WHATSAPP_API_BASE_URL}/health", headers=headers, timeout=HEALTH_TIMEOUT)
+        resp = requests.get(f"{whatsapp.WHATSAPP_API_BASE_URL}/health", headers=headers, timeout=timeout)
     except requests.RequestException as e:
         return None, f"down: bridge not reachable at {whatsapp.WHATSAPP_API_BASE_URL} ({type(e).__name__})"
     if resp.status_code != 200:
@@ -80,14 +93,14 @@ def db_freshness() -> Tuple[Optional[str], Optional[str]]:
     return newest, modified
 
 
-def get_status() -> Dict[str, Any]:
+def get_status(timeout: float = HEALTH_TIMEOUT) -> Dict[str, Any]:
     """Bridge state plus database freshness, with a one-sentence summary.
 
     bridge is one of: "up", "disconnected" (running, not connected to
     WhatsApp), "logged_out" (needs a QR scan), "down" (not reachable) or
     "error" (answered, but not usably).
     """
-    health, problem = bridge_health()
+    health, problem = bridge_health(timeout)
     newest, modified = db_freshness()
     result: Dict[str, Any] = {
         "bridge": "down",
@@ -137,9 +150,19 @@ def get_status() -> Dict[str, Any]:
 
 
 def freshness_header() -> str:
-    """One line for the top of list output. Never raises."""
+    """One line for the top of list output, cached briefly. Never raises."""
+    global _header_cache
+    path, now = whatsapp.MESSAGES_DB_PATH, _now()
+    if _header_cache and _header_cache[0] == path and now < _header_cache[1]:
+        return _header_cache[2]
+    header = _build_header()
+    _header_cache = (path, now + HEADER_CACHE_SECONDS, header)
+    return header
+
+
+def _build_header() -> str:
     try:
-        s = get_status()
+        s = get_status(HEADER_TIMEOUT)
     except Exception as e:  # the header must never break the tool it decorates
         return f"[status unknown: {type(e).__name__}]"
     newest = s["newest_message"] or "none"
