@@ -90,7 +90,9 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	}
 
 	if err != nil {
-		logger.Warnf("Failed to store message: %v", err)
+		// Not acknowledged: whatsmeow redelivers it later (see bridgeEvents).
+		logger.Errorf("Failed to store message %s, not acknowledging it: %v", msg.Info.ID, err)
+		return false
 	} else {
 		// Log message reception
 		timestamp := msg.Info.Timestamp.Format("2006-01-02 15:04:05")
@@ -120,16 +122,52 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	return true
 }
 
-// TODO(#18) stubs so the tests compile.
-type bridgeEvents struct{}
-
-func newBridgeEvents(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger) *bridgeEvents {
-	return &bridgeEvents{}
+// bridgeEvents is the bridge's whatsmeow event handler. It is registered with
+// AddEventHandlerWithSuccessStatus: returning false for a message whose store
+// failed makes whatsmeow skip the delivery receipt, so the server redelivers
+// it on a later connection, and the decrypted event buffer (configureClient)
+// hands the plaintext to the handler again.
+type bridgeEvents struct {
+	client *whatsmeow.Client
+	store  *MessageStore
+	logger waLog.Logger
 }
 
-func (b *bridgeEvents) handle(evt any) bool { return true }
+func newBridgeEvents(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger) *bridgeEvents {
+	return &bridgeEvents{client: client, store: store, logger: logger}
+}
 
-func configureClient(client *whatsmeow.Client) {}
+// handle processes one event and reports whether it may be acknowledged.
+func (b *bridgeEvents) handle(evt any) bool {
+	switch v := evt.(type) {
+	case *events.Message:
+		return handleMessage(b.client, b.store, v, b.logger)
+
+	case *events.HistorySync:
+		handleHistorySync(b.client, b.store, v, b.logger)
+
+	case *events.Connected:
+		b.logger.Infof("Connected to WhatsApp")
+		go backfillChatNames(b.client, b.store, b.logger)
+
+	case *events.LoggedOut:
+		b.logger.Warnf("Device logged out, please scan QR code to log in again")
+	}
+	return true
+}
+
+// configureClient sets the whatsmeow options the bridge relies on.
+func configureClient(client *whatsmeow.Client) {
+	// Keep decrypted messages until the handler succeeded, so a message whose
+	// store failed (handler returned false, no receipt sent) is replayed from
+	// the buffer when the server redelivers it. Without it the redelivered
+	// ciphertext can't be decrypted a second time.
+	client.EnableDecryptedEventBuffer = true
+	// A retryable network error on the first Connect is retried in the
+	// background instead of failing startup (see main).
+	client.EnableAutoReconnect = true
+	client.InitialAutoReconnect = true
+}
 
 func main() {
 	flags, err := parseFlags(os.Args[1:])
@@ -232,25 +270,10 @@ func main() {
 	// Every event counts as a sign of life for /api/health.
 	client.AddEventHandler(health.eventHandler)
 
-	// Setup event handling for messages and history sync
-	client.AddEventHandler(func(evt interface{}) {
-		switch v := evt.(type) {
-		case *events.Message:
-			// Process regular messages
-			handleMessage(client, messageStore, v, logger)
-
-		case *events.HistorySync:
-			// Process history sync events
-			handleHistorySync(client, messageStore, v, logger)
-
-		case *events.Connected:
-			logger.Infof("Connected to WhatsApp")
-			go backfillChatNames(client, messageStore, logger)
-
-		case *events.LoggedOut:
-			logger.Warnf("Device logged out, please scan QR code to log in again")
-		}
-	})
+	// Messages, history sync and connection events. A message that fails to
+	// store is not acknowledged (see bridgeEvents).
+	configureClient(client)
+	client.AddEventHandlerWithSuccessStatus(newBridgeEvents(client, messageStore, logger).handle)
 
 	// Create channel to track connection success
 	connected := make(chan bool, 1)
