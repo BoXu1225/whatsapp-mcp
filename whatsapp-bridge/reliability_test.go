@@ -85,6 +85,7 @@ func TestEventHandlerDoesNotAckFailedStore(t *testing.T) {
 
 	store := newTestStore(t)
 	b := newBridgeEvents(nil, store, logger)
+	b.markReady()
 	if ok := b.handle(liveMessageEvent(t, store)); !ok {
 		t.Errorf("stored message: handler returned false")
 	}
@@ -93,6 +94,7 @@ func TestEventHandlerDoesNotAckFailedStore(t *testing.T) {
 	evt := liveMessageEvent(t, failing)
 	failInserts(t, failing)
 	b = newBridgeEvents(nil, failing, logger)
+	b.markReady()
 	if ok := b.handle(evt); ok {
 		t.Errorf("failed store: handler returned true, want false so WhatsApp isn't acked")
 	}

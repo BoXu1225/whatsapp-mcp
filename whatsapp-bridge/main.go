@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -131,20 +132,43 @@ type bridgeEvents struct {
 	client *whatsmeow.Client
 	store  *MessageStore
 	logger waLog.Logger
+	media  *mediaService // handles media retry answers; may be nil
+
+	// ready is closed once the store's migrations are complete (right after
+	// pairing on a first run). Message events wait for it.
+	ready     chan struct{}
+	readyOnce sync.Once
 }
 
 func newBridgeEvents(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger) *bridgeEvents {
-	return &bridgeEvents{client: client, store: store, logger: logger}
+	return &bridgeEvents{client: client, store: store, logger: logger, ready: make(chan struct{})}
+}
+
+// markReady lets message events through. Safe to call more than once.
+func (b *bridgeEvents) markReady() {
+	b.readyOnce.Do(func() { close(b.ready) })
 }
 
 // handle processes one event and reports whether it may be acknowledged.
 func (b *bridgeEvents) handle(evt any) bool {
 	switch v := evt.(type) {
 	case *events.Message:
-		return handleMessage(b.client, b.store, v, b.logger)
+		<-b.ready
+		if !handleMessage(b.client, b.store, v, b.logger) {
+			return false
+		}
+		url, dp := mediaDirectPath(v.Message)
+		b.storeDirectPaths([]directPathRef{{id: v.Info.ID, url: url, directPath: dp}})
 
 	case *events.HistorySync:
+		<-b.ready
 		handleHistorySync(b.client, b.store, v, b.logger)
+		b.storeDirectPaths(historyDirectPaths(v))
+
+	case *events.MediaRetry:
+		if b.media != nil {
+			go b.media.handleRetry(v)
+		}
 
 	case *events.Connected:
 		b.logger.Infof("Connected to WhatsApp")
@@ -154,6 +178,28 @@ func (b *bridgeEvents) handle(evt any) bool {
 		b.logger.Warnf("Device logged out, please scan QR code to log in again")
 	}
 	return true
+}
+
+// storeDirectPaths records media direct paths. A failure only costs the
+// URL-derived fallback at download time, so it is logged, not reported.
+func (b *bridgeEvents) storeDirectPaths(refs []directPathRef) {
+	if err := b.store.StoreDirectPaths(refs); err != nil {
+		b.logger.Warnf("Failed to store media direct paths: %v", err)
+	}
+}
+
+// historyDirectPaths lists the media direct paths in a history sync.
+func historyDirectPaths(evt *events.HistorySync) []directPathRef {
+	var refs []directPathRef
+	for _, conv := range evt.Data.GetConversations() {
+		for _, m := range conv.GetMessages() {
+			web := m.GetMessage()
+			if url, dp := mediaDirectPath(web.GetMessage()); dp != "" {
+				refs = append(refs, directPathRef{id: web.GetKey().GetID(), url: url, directPath: dp})
+			}
+		}
+	}
+	return refs
 }
 
 // configureClient sets the whatsmeow options the bridge relies on.
@@ -273,7 +319,13 @@ func main() {
 	// Messages, history sync and connection events. A message that fails to
 	// store is not acknowledged (see bridgeEvents).
 	configureClient(client)
-	client.AddEventHandlerWithSuccessStatus(newBridgeEvents(client, messageStore, logger).handle)
+	media := newMediaService(clientFetcher(client), messageStore)
+	bridge := newBridgeEvents(client, messageStore, logger)
+	bridge.media = media
+	if client.Store.ID != nil {
+		bridge.markReady() // identity migrations ran above
+	}
+	client.AddEventHandlerWithSuccessStatus(bridge.handle)
 
 	// Create channel to track connection success
 	connected := make(chan bool, 1)
@@ -303,6 +355,15 @@ func main() {
 		select {
 		case <-connected:
 			fmt.Println("\nSuccessfully connected and authenticated!")
+			// Now that we know our JIDs, finish the migrations before any
+			// message is stored (message events wait for markReady).
+			if _, err := messageStore.MigrateIdentity(clientIdentity(client)); err != nil {
+				logger.Errorf("Failed to migrate message store: %v", err)
+				client.Disconnect()
+				messageStore.Close()
+				os.Exit(1)
+			}
+			bridge.markReady()
 		case <-time.After(3 * time.Minute):
 			logger.Errorf("Timeout waiting for QR code scan")
 			return
@@ -333,6 +394,7 @@ func main() {
 	api.token = token
 	api.allowedDirs = allowedDirs
 	api.health = health
+	api.media = media
 	serveREST(api, restListener)
 
 	// Create a channel to keep the main goroutine alive

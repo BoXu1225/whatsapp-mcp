@@ -274,8 +274,8 @@ func TestMigration5FromVersion4(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertCaptureSchema(t, store.db)
-	if got := appliedVersions(t, store); strings.Join(got, ",") != "1,2,3,4,5" {
-		t.Errorf("schema_version = %v, want 1..5", got)
+	if got := appliedVersions(t, store); strings.Join(got, ",") != "1,2,3,4,5,6" {
+		t.Errorf("schema_version = %v, want 1..6", got)
 	}
 	b := backups(t, dir)
 	if len(b) != before+1 {
@@ -334,7 +334,7 @@ func TestCaptureColumnsExistBeforeIdentityMigrations(t *testing.T) {
 	if _, err := store.MigrateIdentity(testIdentity()); err != nil {
 		t.Fatal(err)
 	}
-	if got := appliedVersions(t, store); strings.Join(got, ",") != "1,2,3,4,5" {
-		t.Errorf("schema_version = %v, want 1..5", got)
+	if got := appliedVersions(t, store); strings.Join(got, ",") != "1,2,3,4,5,6" {
+		t.Errorf("schema_version = %v, want 1..6", got)
 	}
 }
