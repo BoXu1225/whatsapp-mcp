@@ -297,3 +297,20 @@ def test_every_requests_call_has_a_timeout():
             ):
                 missing.append(f"{path.name}:{node.lineno}")
     assert missing == []
+
+
+def test_newest_message_mixed_legacy_and_utc_rows(messages_db, monkeypatch):
+    """Before the bridge migrates: old +01:00 rows next to new UTC rows (#14).
+
+    As text, the old row sorts last; as instants, the new UTC row is newest.
+    """
+    answer(monkeypatch, exc=requests.ConnectionError("refused"))
+    messages_db.add_chat(ALICE, "Alice Example", datetime(2024, 7, 1, 11, 0, tzinfo=timezone.utc))
+    import sqlite3
+
+    with sqlite3.connect(messages_db.path) as conn:
+        # 11:30+01:00 is 10:30Z (old bridge, local offset); 11:00+00:00 (new bridge, UTC).
+        conn.execute("INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) VALUES "
+                     "('old', ?, 's', 'a', '2024-07-01 11:30:00+01:00', 0), "
+                     "('new', ?, 's', 'b', '2024-07-01 11:00:00+00:00', 0)", (ALICE, ALICE))
+    assert main.get_status()["newest_message"] == "2024-07-01T11:00:00Z"
