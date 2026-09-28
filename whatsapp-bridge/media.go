@@ -122,7 +122,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	// Create a downloader that implements DownloadableMessage
 	var waMediaType whatsmeow.MediaType
 	switch mediaType {
-	case "image":
+	case "image", "sticker":
 		waMediaType = whatsmeow.MediaImage
 	case "video":
 		waMediaType = whatsmeow.MediaVideo
