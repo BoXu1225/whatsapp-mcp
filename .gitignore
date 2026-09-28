@@ -11,6 +11,7 @@ whatsapp-bridge/store/
 
 # Build output
 whatsapp-bridge/whatsapp-bridge
+# (whatsapp-client: the binary name before the Go module was renamed)
 whatsapp-bridge/whatsapp-client
 
 # Local config
