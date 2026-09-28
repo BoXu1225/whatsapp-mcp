@@ -15,7 +15,7 @@ from whatsapp import (
     list_chats as whatsapp_list_chats,
     list_messages as whatsapp_list_messages,
     load_directory,
-    search_contacts as whatsapp_search_contacts,
+    search_contacts_counted as whatsapp_search_contacts_counted,
     send_audio_message as whatsapp_audio_voice_message,
     send_file as whatsapp_send_file,
     send_message as whatsapp_send_message,
@@ -25,10 +25,12 @@ from whatsapp import (
 mcp = FastMCP("whatsapp")
 
 @mcp.tool()
-def search_contacts(query: str) -> List[Dict[str, Any]]:
+def search_contacts(query: str, limit: int = 50) -> Dict[str, Any]:
     """Search WhatsApp contacts by name or number, including contacts you have no chat with.
 
-    Each result has separate fields:
+    Returns {"contacts": [...], "total_matches": n, "truncated": bool}, plus a "note" when
+    truncated (more matches than `limit`; refine the query or raise the limit).
+    Each contact has separate fields:
       jid      - the JID to use for this person (their existing chat if any, else phone JID, else LID JID)
       phone    - phone number with country code, digits only; None if unknown
       lid      - WhatsApp LID (an opaque ID, NOT a phone number); None if unknown
@@ -39,9 +41,13 @@ def search_contacts(query: str) -> List[Dict[str, Any]]:
 
     Args:
         query: Name fragment, or digits of a phone number / LID
+        limit: Maximum number of contacts to return (default 50)
     """
-    contacts = whatsapp_search_contacts(query)
-    return contacts
+    contacts, total = whatsapp_search_contacts_counted(query, limit)
+    result: Dict[str, Any] = {"contacts": contacts, "total_matches": total, "truncated": total > len(contacts)}
+    if result["truncated"]:
+        result["note"] = f"Showing {len(contacts)} of {total} matches. Refine the query or pass a higher limit."
+    return result
 
 @mcp.tool()
 def list_messages(
