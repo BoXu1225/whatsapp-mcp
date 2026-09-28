@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"google.golang.org/protobuf/proto"
@@ -214,5 +215,59 @@ func TestDownloadMediaRejectsTraversalChatJID(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(store.dir, "..", "outside")); !os.IsNotExist(err) {
 		t.Errorf("directory created outside the store (stat err %v)", err)
+	}
+}
+
+func TestSafeMediaFilenameReplacesControlChars(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"a\nb.pdf", "a_b.pdf"},
+		{"report\r\n[12:00:00] fake log line.pdf", "report__[12:00:00] fake log line.pdf"},
+		{"tab\there.txt", "tab_here.txt"},
+		{"\x1b[31mred.txt", "_[31mred.txt"},
+		{"del\x7f.txt", "del_.txt"},
+		{"nel\u0085.txt", "nel_.txt"},
+		{"ünïcödé ok.txt", "ünïcödé ok.txt"},
+	}
+	for _, tt := range tests {
+		got, ok := safeMediaFilename(tt.in)
+		if !ok || got != tt.want {
+			t.Errorf("safeMediaFilename(%q) = %q, %v; want %q", tt.in, got, ok, tt.want)
+		}
+	}
+}
+
+func TestSafeMediaFilenameTruncatesKeepingExtension(t *testing.T) {
+	tests := []struct {
+		name, in, wantSuffix string
+	}{
+		{"long ascii", strings.Repeat("a", 300) + ".pdf", ".pdf"},
+		{"long multibyte", strings.Repeat("é", 150) + ".txt", ".txt"},
+		{"long no extension", strings.Repeat("b", 500), "b"},
+		{"long extension", "x." + strings.Repeat("z", 300), "z"},
+		{"long after traversal", "../../" + strings.Repeat("c", 250) + ".jpeg", ".jpeg"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := safeMediaFilename(tt.in)
+			if !ok {
+				t.Fatalf("rejected %q", tt.in)
+			}
+			if len(got) > maxMediaFilenameBytes {
+				t.Errorf("len = %d, want <= %d", len(got), maxMediaFilenameBytes)
+			}
+			if len(got) < maxMediaFilenameBytes-4 {
+				t.Errorf("len = %d, truncated more than needed", len(got))
+			}
+			if !strings.HasSuffix(got, tt.wantSuffix) {
+				t.Errorf("%q lost its suffix %q", got, tt.wantSuffix)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("%q is not valid UTF-8", got)
+			}
+		})
+	}
+	short := "short.pdf"
+	if got, _ := safeMediaFilename(short); got != short {
+		t.Errorf("short name changed to %q", got)
 	}
 }
