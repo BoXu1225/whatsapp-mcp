@@ -9,6 +9,9 @@ import (
 	"strings"
 )
 
+// maxMediaFilenameBytes caps sanitised filenames (most filesystems allow 255).
+const maxMediaFilenameBytes = 200
+
 // safeMediaFilename reduces a sender-provided filename to its last path
 // element, treating both / and \ as separators. It reports false for names
 // that are empty, ".", "..", a bare separator or contain NUL.
