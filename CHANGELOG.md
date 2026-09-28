@@ -9,6 +9,54 @@ which this fork started from.
 
 ## [Unreleased]
 
+### Added
+
+- Schema versioning for `messages.db`: a `schema_version` table and ordered
+  migrations, each in its own transaction. Before the first pending migration
+  on a database with data, the bridge saves `store/messages.db.bak-<version>-<UTC
+  timestamp>` (mode 0600). A failed migration is rolled back and the bridge
+  exits 1, naming the backup.
+- `messages.sender_alt`: the sender's other address (phone JID for a LID
+  sender and vice versa) when known (#8).
+
+### Changed
+
+- Timestamps are stored in UTC. The MCP server reads `Z`, offsets and local
+  (no offset) times in `after`/`before`/`since`, and shows times in local
+  time with their offset, e.g. `2024-03-31 02:30:00+01:00` (#14).
+- A 1:1 chat is keyed by the person's `@lid` JID when the LID is known, else
+  by their phone JID. Phone-number and LID copies of a chat are merged, on
+  upgrade and when a message reveals the mapping. The first such live merge
+  in a run backs up `messages.db` first (#9).
+- Senders are stored as full JIDs without device part. In a 1:1 chat the
+  other person uses the chat's JID. Your own messages use your LID in LID
+  chats and your phone JID elsewhere. The MCP server reads old bare-number
+  senders too (#8).
+
+### Migrations
+
+1. `utc_timestamps`: converts `messages.timestamp` and `chats.last_message_time`.
+2. `sender_alt_column`: adds `messages.sender_alt`.
+3. `canonical_chats`: merges PN/LID duplicate chats (a message ID in both keeps
+   the LID chat's copy, the better name and later time win) and re-keys
+   phone-number chats with a known LID.
+4. `canonical_senders`: bare numbers become full JIDs, device parts are
+   dropped, own messages follow the rule above and `sender_alt` is filled.
+   Bare numbers whose server can't be determined are left and counted.
+
+Migrations 3 and 4 need the device store and run only when logged in; they
+wait for a start after login otherwise.
+
+### Upgrade notes
+
+- Rebuild and restart the bridge, then restart the MCP server. The first start
+  writes `store/messages.db.bak-0-<timestamp>`; delete it when you're satisfied.
+- Until the bridge has migrated, time filters on old rows may be off by the
+  UTC offset.
+- A re-keyed chat's JID changes from `<phone>@s.whatsapp.net` to `<lid>@lid`.
+  Media already downloaded stays under the old `store/<phone JID>/` folder;
+  `download_media` with the new JID fetches it again.
+
 ## [0.2.0] - 2026-09-28
 
 First release of the fork. Issue numbers refer to
