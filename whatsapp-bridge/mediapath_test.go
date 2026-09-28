@@ -1,0 +1,169 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"google.golang.org/protobuf/proto"
+)
+
+func TestSafeMediaFilename(t *testing.T) {
+	tests := []struct {
+		in     string
+		want   string
+		wantOK bool
+	}{
+		{"report.pdf", "report.pdf", true},
+		{"my report (final).pdf", "my report (final).pdf", true},
+		{".hidden", ".hidden", true},
+		{"../../etc/passwd", "passwd", true},
+		{"/etc/passwd", "passwd", true},
+		{"sub/dir/file.txt", "file.txt", true},
+		{`..\..\evil.exe`, "evil.exe", true},
+		{`C:\Windows\system32\x.dll`, "x.dll", true},
+		{"dir/", "dir", true},
+		{"", "", false},
+		{".", "", false},
+		{"..", "", false},
+		{"../", "", false},
+		{"/", "", false},
+		{`\`, "", false},
+		{"a/..", "", false},
+		{"bad\x00name.pdf", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			got, ok := safeMediaFilename(tt.in)
+			if ok != tt.wantOK || (ok && got != tt.want) {
+				t.Errorf("safeMediaFilename(%q) = %q, %v; want %q, %v", tt.in, got, ok, tt.want, tt.wantOK)
+			}
+			if ok && (strings.ContainsAny(got, `/\`) || got == "." || got == "..") {
+				t.Errorf("safeMediaFilename(%q) = %q is not a plain base name", tt.in, got)
+			}
+		})
+	}
+}
+
+// storeUnderTemp returns a store dir three levels below a temp root, so even a
+// path that escapes it by a few ".." stays inside the test's temp dir.
+func storeUnderTemp(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "a", "b", "store")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestMediaLocalPathStaysInStore(t *testing.T) {
+	tests := []struct {
+		name     string
+		chatJID  string
+		filename string
+		wantBase string // "" means rejected
+	}{
+		{"plain", "15550000001@s.whatsapp.net", "report.pdf", "report.pdf"},
+		{"device jid colon", "15550000001:12@s.whatsapp.net", "image_1.jpg", "image_1.jpg"},
+		{"group", "120363000000000001@g.us", "doc.pdf", "doc.pdf"},
+		{"filename traversal", "15550000001@s.whatsapp.net", "../../evil.sh", "evil.sh"},
+		{"filename deep traversal", "15550000001@s.whatsapp.net", "../../../../../../tmp/evil.sh", "evil.sh"},
+		{"filename absolute", "15550000001@s.whatsapp.net", "/etc/cron.d/evil", "evil"},
+		{"filename backslashes", "15550000001@s.whatsapp.net", `..\..\evil.bat`, "evil.bat"},
+		{"filename empty", "15550000001@s.whatsapp.net", "", ""},
+		{"filename dotdot", "15550000001@s.whatsapp.net", "..", ""},
+		{"filename dot", "15550000001@s.whatsapp.net", ".", ""},
+		{"chat traversal", "../..", "x.pdf", ""},
+		{"chat with slash", "../escape@s.whatsapp.net", "x.pdf", ""},
+		{"chat absolute", "/tmp", "x.pdf", ""},
+		{"chat empty", "", "x.pdf", ""},
+		{"chat dot", ".", "x.pdf", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			storeDir := storeUnderTemp(t)
+			got, err := mediaLocalPath(storeDir, tt.chatJID, tt.filename)
+			if tt.wantBase == "" {
+				if err == nil {
+					t.Errorf("mediaLocalPath(%q, %q) = %q, want rejection", tt.chatJID, tt.filename, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("mediaLocalPath(%q, %q): %v", tt.chatJID, tt.filename, err)
+			}
+			realStore, _ := filepath.EvalSymlinks(storeDir)
+			if !filepath.IsAbs(got) {
+				t.Errorf("path %q is not absolute", got)
+			}
+			rel, err := filepath.Rel(realStore, got)
+			if err != nil || strings.HasPrefix(rel, "..") || strings.Count(rel, string(filepath.Separator)) != 1 {
+				t.Errorf("path %q is not <store>/<chat>/<file> under %q", got, realStore)
+			}
+			if filepath.Base(got) != tt.wantBase {
+				t.Errorf("file name = %q, want %q", filepath.Base(got), tt.wantBase)
+			}
+			info, err := os.Stat(filepath.Dir(got))
+			if err != nil {
+				t.Fatalf("chat dir not created: %v", err)
+			}
+			if perm := info.Mode().Perm(); perm != 0o700 {
+				t.Errorf("chat dir mode = %o, want 700", perm)
+			}
+		})
+	}
+}
+
+func TestMediaLocalPathRejectsSymlinkedChatDir(t *testing.T) {
+	storeDir := storeUnderTemp(t)
+	outside := t.TempDir()
+	chat := "15550000001@s.whatsapp.net"
+	if err := os.Symlink(outside, filepath.Join(storeDir, chat)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if got, err := mediaLocalPath(storeDir, chat, "x.pdf"); err == nil {
+		t.Errorf("mediaLocalPath through a symlinked chat dir = %q, want rejection", got)
+	}
+}
+
+func TestSaveMediaFileIsPrivate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.jpg")
+	if err := saveMediaFile(path, []byte("fake")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("media file mode = %o, want 600", perm)
+	}
+}
+
+func TestExtractMediaInfoSanitisesDocumentFilename(t *testing.T) {
+	tests := []struct {
+		in         string
+		want       string
+		wantPrefix string
+	}{
+		{"../../.ssh/authorized_keys", "authorized_keys", ""},
+		{"/etc/passwd", "passwd", ""},
+		{`..\..\evil.exe`, "evil.exe", ""},
+		{"..", "", "document_"},
+		{"/", "", "document_"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			msg := &waProto.Message{DocumentMessage: &waProto.DocumentMessage{FileName: proto.String(tt.in)}}
+			_, filename, _, _, _, _, _ := extractMediaInfo(msg)
+			if tt.want != "" && filename != tt.want {
+				t.Errorf("filename = %q, want %q", filename, tt.want)
+			}
+			if tt.wantPrefix != "" && !strings.HasPrefix(filename, tt.wantPrefix) {
+				t.Errorf("filename = %q, want prefix %q", filename, tt.wantPrefix)
+			}
+		})
+	}
+}
