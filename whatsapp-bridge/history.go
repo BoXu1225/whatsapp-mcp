@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -13,23 +14,43 @@ import (
 
 // Handle history sync events
 func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, historySync *events.HistorySync, logger waLog.Logger) {
-	storeHistorySync(messageStore, clientIdentity(client), historySync, clientChatNamer(client, messageStore, logger), logger)
+	id := clientIdentity(client)
+	parse := identityWebParser(id)
+	if client != nil && client.Store != nil && client.Store.ID != nil {
+		parse = client.ParseWebMessage
+	}
+	storeHistorySyncWith(messageStore, id, parse, historySync, clientChatNamer(client, messageStore, logger), logger)
 }
 
-// storeHistorySync stores history-sync conversations under their canonical
-// chat and sender JIDs (identity.go), merging a phone-number chat for the
-// same person into the canonical LID chat.
+// storeHistorySync stores a history-sync batch, parsing messages with only
+// our own JIDs (see identityWebParser).
 func storeHistorySync(messageStore *MessageStore, id Identity, historySync *events.HistorySync, name chatNamer, logger waLog.Logger) {
+	storeHistorySyncWith(messageStore, id, identityWebParser(id), historySync, name, logger)
+}
+
+// historyConversation is one conversation of a batch, ready to store.
+type historyConversation struct {
+	chat     types.JID
+	name     string
+	convTime time.Time // conversationTimestamp; zero if unset
+	msgs     []*events.Message
+}
+
+// storeHistorySyncWith stores history-sync conversations under their
+// canonical chat and sender JIDs (identity.go), merging a phone-number chat
+// for the same person into the canonical LID chat. Each message is parsed
+// with parse (unwrapping it like a live message) and stored by
+// processMessage, oldest first, so an edit or reaction in the batch finds
+// its target. Chat merges and names are resolved first; then the whole
+// batch is written in one transaction.
+func storeHistorySyncWith(messageStore *MessageStore, id Identity, parse webParser, historySync *events.HistorySync, name chatNamer, logger waLog.Logger) {
 	fmt.Printf("Received history sync event with %d conversations\n", len(historySync.Data.Conversations))
 
-	syncedCount := 0
+	var convs []historyConversation
 	for _, conversation := range historySync.Data.Conversations {
-		// Parse JID from the conversation
-		if conversation.ID == nil {
+		if conversation.ID == nil || len(conversation.Messages) == 0 {
 			continue
 		}
-
-		// Try to parse the JID
 		convJID, err := types.ParseJID(*conversation.ID)
 		if err != nil {
 			logger.Warnf("Failed to parse JID %s: %v", *conversation.ID, err)
@@ -41,7 +62,6 @@ func storeHistorySync(messageStore *MessageStore, id Identity, historySync *even
 			lidHint = l
 		}
 		jid := id.CanonicalChat(convJID, lidHint)
-		chatJID := jid.String()
 		if jid.Server == types.HiddenUserServer {
 			pn := convJID.ToNonAD()
 			if pn.Server != types.DefaultUserServer {
@@ -53,110 +73,92 @@ func storeHistorySync(messageStore *MessageStore, id Identity, historySync *even
 				}
 			}
 			if pn.Server == types.DefaultUserServer && pn.User != "" {
-				if err := messageStore.MergeChat(pn.String(), chatJID, id); err != nil {
-					logger.Warnf("Failed to merge chat %s into %s: %v", pn, chatJID, err)
+				if err := messageStore.MergeChat(pn.String(), jid.String(), id); err != nil {
+					logger.Warnf("Failed to merge chat %s into %s: %v", pn, jid, err)
 				}
 			}
 		}
 
-		// Process messages
-		messages := conversation.Messages
-		if len(messages) > 0 {
-			// Update chat with latest message timestamp
-			latestMsg := messages[0]
-			if latestMsg == nil || latestMsg.Message == nil {
+		conv := historyConversation{chat: jid}
+		if ts := conversation.GetConversationTimestamp(); ts != 0 {
+			conv.convTime = time.Unix(int64(ts), 0)
+		}
+		for _, hm := range conversation.Messages {
+			webMsg := hm.GetMessage()
+			if webMsg == nil || webMsg.GetMessageTimestamp() == 0 {
 				continue
 			}
-
-			// Get timestamp from message info
-			timestamp := time.Time{}
-			if ts := latestMsg.Message.GetMessageTimestamp(); ts != 0 {
-				timestamp = time.Unix(int64(ts), 0)
-			} else {
+			evt, err := parse(convJID, webMsg)
+			if err != nil {
+				logger.Warnf("Failed to parse history message %s: %v", webMsg.GetKey().GetID(), err)
 				continue
 			}
+			conv.msgs = append(conv.msgs, evt)
+		}
+		// History lists messages newest first; store oldest first.
+		sort.SliceStable(conv.msgs, func(i, j int) bool {
+			return conv.msgs[i].Info.Timestamp.Before(conv.msgs[j].Info.Timestamp)
+		})
+		// Names may need the network (group info): resolve outside the transaction.
+		conv.name = name(jid, conversation)
+		convs = append(convs, conv)
+	}
 
-			// Get appropriate chat name by passing the history sync conversation directly
-			if err := messageStore.StoreChat(chatJID, name(jid, conversation), timestamp); err != nil {
+	syncedCount := 0
+	err := messageStore.InTx(func(tx *MessageStore) error {
+		for _, conv := range convs {
+			chatJID := conv.chat.String()
+			chatName := conv.name
+			last := conv.convTime
+			for _, evt := range conv.msgs {
+				webMsg := evt.SourceWebMsg
+				participant := webMsg.GetParticipant()
+				if participant == "" {
+					participant = webMsg.GetKey().GetParticipant()
+				}
+				sender, senderAlt := id.HistorySender(conv.chat, evt.Info.IsFromMe, participant)
+				res, err := processMessage(tx, evt, captureTarget{
+					chat:      conv.chat,
+					chatName:  func() string { return chatName },
+					sender:    sender,
+					senderAlt: senderAlt,
+				})
+				if err != nil {
+					logger.Warnf("Failed to store history message %s: %v", evt.Info.ID, err)
+					continue
+				}
+				if !res.stored {
+					continue
+				}
+				if evt.Info.Timestamp.After(last) {
+					last = evt.Info.Timestamp
+				}
+				if res.kind != "message" {
+					continue
+				}
+				syncedCount++
+				// Per-message logging (with content) only with -debug
+				ts := evt.Info.Timestamp.Format("2006-01-02 15:04:05")
+				if res.mediaType != "" {
+					debugInfof(logger, "Stored message: [%s] %s -> %s: [%s: %s] %s",
+						ts, sender, chatJID, res.mediaType, res.filename, res.content)
+				} else {
+					debugInfof(logger, "Stored message: [%s] %s -> %s: %s", ts, sender, chatJID, res.content)
+				}
+			}
+			if last.IsZero() {
+				continue
+			}
+			if err := tx.StoreChat(chatJID, chatName, last); err != nil {
 				logger.Warnf("Failed to store chat: %v", err)
 			}
-
-			// Store messages
-			for _, msg := range messages {
-				if msg == nil || msg.Message == nil {
-					continue
-				}
-
-				// Extract text content
-				var content string
-				if msg.Message.Message != nil {
-					if conv := msg.Message.Message.GetConversation(); conv != "" {
-						content = conv
-					} else if ext := msg.Message.Message.GetExtendedTextMessage(); ext != nil {
-						content = ext.GetText()
-					}
-				}
-
-				// Extract media info
-				var mediaType, filename, url string
-				var mediaKey, fileSHA256, fileEncSHA256 []byte
-				var fileLength uint64
-
-				if msg.Message.Message != nil {
-					mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg.Message.Message)
-				}
-
-				// Skip messages with no content and no media
-				if content == "" && mediaType == "" {
-					continue
-				}
-
-				// Determine sender
-				isFromMe := msg.Message.GetKey().GetFromMe()
-				sender, senderAlt := id.HistorySender(jid, isFromMe, msg.Message.GetKey().GetParticipant())
-
-				// Store message
-				msgID := msg.Message.GetKey().GetID()
-
-				// Get message timestamp
-				timestamp := time.Time{}
-				if ts := msg.Message.GetMessageTimestamp(); ts != 0 {
-					timestamp = time.Unix(int64(ts), 0)
-				} else {
-					continue
-				}
-
-				err = messageStore.StoreMessageWithAlt(
-					msgID,
-					chatJID,
-					sender,
-					senderAlt,
-					content,
-					timestamp,
-					isFromMe,
-					mediaType,
-					filename,
-					url,
-					mediaKey,
-					fileSHA256,
-					fileEncSHA256,
-					fileLength,
-				)
-				if err != nil {
-					logger.Warnf("Failed to store history message: %v", err)
-				} else {
-					syncedCount++
-					// Per-message logging (with content) only with -debug
-					if mediaType != "" {
-						debugInfof(logger, "Stored message: [%s] %s -> %s: [%s: %s] %s",
-							timestamp.Format("2006-01-02 15:04:05"), sender, chatJID, mediaType, filename, content)
-					} else {
-						debugInfof(logger, "Stored message: [%s] %s -> %s: %s",
-							timestamp.Format("2006-01-02 15:04:05"), sender, chatJID, content)
-					}
-				}
-			}
 		}
+		return nil
+	})
+	if err != nil {
+		logger.Warnf("Failed to store history sync batch: %v", err)
+		fmt.Println("History sync failed; nothing from this batch was stored.")
+		return
 	}
 
 	fmt.Printf("History sync complete. Stored %d messages.\n", syncedCount)
