@@ -847,6 +847,7 @@ func main() {
 
 		case *events.Connected:
 			logger.Infof("Connected to WhatsApp")
+			go backfillChatNames(client, messageStore, logger)
 
 		case *events.LoggedOut:
 			logger.Warnf("Device logged out, please scan QR code to log in again")
@@ -927,7 +928,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 	// First, check if chat already exists in database with a name
 	var existingName string
 	err := messageStore.db.QueryRow("SELECT name FROM chats WHERE jid = ?", chatJID).Scan(&existingName)
-	if err == nil && existingName != "" {
+	if err == nil && existingName != "" && !isPlaceholderName(jid, existingName) {
 		// Chat exists with a name, use that
 		logger.Infof("Using existing chat name for %s: %s", chatJID, existingName)
 		return existingName
@@ -987,15 +988,10 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 		// This is an individual contact
 		logger.Infof("Getting name for contact: %s", chatJID)
 
-		// Just use contact info (full name)
-		contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
-		if err == nil && contact.FullName != "" {
-			name = contact.FullName
-		} else if sender != "" {
-			// Fallback to sender
-			name = sender
-		} else {
-			// Last fallback to JID
+		// Use contact info, falling back to the JID. The sender isn't a safe
+		// fallback: for a message we sent, it's our own number.
+		name = resolveContactName(client, jid)
+		if name == "" {
 			name = jid.User
 		}
 
@@ -1003,6 +999,74 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 	}
 
 	return name
+}
+
+// isPlaceholderName reports whether a stored chat name is only the fallback
+// built from the JID, so a real name should be looked up again.
+func isPlaceholderName(jid types.JID, name string) bool {
+	return name == jid.User || name == fmt.Sprintf("Group %s", jid.User)
+}
+
+// resolveContactName looks up a contact's name in the device store. Chats with
+// @lid JIDs often have no contact entry of their own, so it also tries the
+// phone-number JID mapped to the LID. Returns "" if nothing is found.
+func resolveContactName(client *whatsmeow.Client, jid types.JID) string {
+	ctx := context.Background()
+	lookup := func(j types.JID) string {
+		contact, err := client.Store.Contacts.GetContact(ctx, j)
+		if err != nil || !contact.Found {
+			return ""
+		}
+		for _, n := range []string{contact.FullName, contact.FirstName, contact.BusinessName, contact.PushName} {
+			if n != "" {
+				return n
+			}
+		}
+		return ""
+	}
+
+	if name := lookup(jid); name != "" {
+		return name
+	}
+	if jid.Server == types.HiddenUserServer {
+		pn, err := client.Store.LIDs.GetPNForLID(ctx, jid)
+		if err == nil && !pn.IsEmpty() {
+			return lookup(pn)
+		}
+	}
+	return ""
+}
+
+// backfillChatNames replaces placeholder names of individual chats stored
+// before their contact name could be resolved.
+func backfillChatNames(client *whatsmeow.Client, messageStore *MessageStore, logger waLog.Logger) {
+	rows, err := messageStore.db.Query("SELECT jid, name FROM chats")
+	if err != nil {
+		logger.Warnf("Failed to read chats for name backfill: %v", err)
+		return
+	}
+	updates := map[string]string{}
+	for rows.Next() {
+		var chatJID, name string
+		if err := rows.Scan(&chatJID, &name); err != nil {
+			continue
+		}
+		jid, err := types.ParseJID(chatJID)
+		if err != nil || jid.Server == "g.us" || !isPlaceholderName(jid, name) {
+			continue
+		}
+		if resolved := resolveContactName(client, jid); resolved != "" {
+			updates[chatJID] = resolved
+		}
+	}
+	rows.Close()
+
+	for chatJID, name := range updates {
+		if _, err := messageStore.db.Exec("UPDATE chats SET name = ? WHERE jid = ?", name, chatJID); err != nil {
+			logger.Warnf("Failed to update name for %s: %v", chatJID, err)
+		}
+	}
+	logger.Infof("Chat name backfill: updated %d chats", len(updates))
 }
 
 // Handle history sync events
