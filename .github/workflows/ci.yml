@@ -41,3 +41,11 @@ jobs:
       - run: uv sync --group dev --locked
       - run: uv run ruff check
       - run: uv run pytest
+
+  scripts:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n scripts/*.sh
+      - run: shellcheck scripts/*.sh
