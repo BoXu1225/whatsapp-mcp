@@ -102,8 +102,8 @@ stop() {
   echo "Bridge killed."
 }
 
-# health prints the bridge's /api/health JSON. Exit status: 0 connected,
-# 2 running but not connected, 1 not reachable.
+# health prints the bridge's /api/health JSON. Exit status: 0 connected and
+# logged in, 2 running but not connected or not logged in, 1 not reachable.
 health() {
   if [[ ! -r "$TOKEN_FILE" ]]; then
     echo "No API token at $TOKEN_FILE. Has the bridge been started?"
@@ -120,7 +120,8 @@ health() {
   else
     printf '%s\n' "$body"
   fi
-  [[ "$body" == *'"connected":true'* ]] || return 2
+  local compact="${body//[[:space:]]/}"
+  [[ "$compact" == *'"connected":true'* && "$compact" == *'"logged_in":true'* ]] || return 2
 }
 
 case "${1:-start}" in
