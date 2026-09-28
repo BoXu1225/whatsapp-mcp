@@ -32,8 +32,38 @@ which this fork started from.
   (`[↪ reply to <id>]`), `[deleted]`, `(edited)` and reactions
   (`[reactions: 👍×2]`); `get_message_context` messages gain `reply_to`,
   `edited`, `deleted` and `reactions` fields (#15, #16).
+- `POST /api/history` and the `request_history` tool: ask the phone for up to
+  50 messages older than the oldest stored one in a chat. Returns 202 and a
+  request ID; the messages arrive asynchronously as an on-demand history sync
+  (#20).
+- Media retry: when a download gets 404/410 (expired media), the bridge asks
+  the sender's phone to re-upload it and returns 202 with `retry_requested`;
+  the re-upload is downloaded when it arrives (#19).
 
 ### Changed
+
+- `messages.db` is opened with `_journal_mode=WAL&_busy_timeout=5000`. The
+  message handler is registered with `AddEventHandlerWithSuccessStatus` and
+  returns false when a message fails to store, so it is not acknowledged; with
+  whatsmeow's decrypted event buffer on, the redelivered message is stored on
+  a later connection instead of being lost (#18).
+- Media is saved as `store/<chat>/<message ID>.<ext>` instead of a name built
+  from the time of storing, which collided for media stored in the same
+  second. `download_media` also returns `original_filename`. Files saved
+  under old names are still found, and only used if their SHA-256 matches
+  (#19).
+- Downloads use the stored `direct_path` and fall back to the path in the URL
+  (#19).
+- The bridge exits with status 1 when WhatsApp logs it out (with how to
+  re-pair: `scripts/bridge.sh fg`), when the REST server fails, and when it
+  isn't connected 60 s after start. A transient network error on the first
+  connect is retried in the background. Ctrl+C/SIGTERM stops the REST server,
+  then the connection, then the database (#21).
+- Group names are fetched from WhatsApp at most once per group per run (#21).
+- Status updates (`status@broadcast`) are no longer stored (#21).
+- Schema migrations are applied by version number rather than "everything
+  above the highest applied version", so migrations merged out of order all
+  run. On a first run the login-dependent migrations run right after pairing.
 
 - Timestamps are stored in UTC. The MCP server reads `Z`, offsets and local
   (no offset) times in `after`/`before`/`since`, and shows times in local
@@ -54,6 +84,11 @@ which this fork started from.
   chats and your phone JID elsewhere. The MCP server reads old bare-number
   senders too (#8).
 
+### Removed
+
+- The unused and broken `requestHistorySync` (#20) and the "Type 'help' for
+  commands" message (#21).
+
 ### Migrations
 
 1. `utc_timestamps`: converts `messages.timestamp` and `chats.last_message_time`.
@@ -64,10 +99,11 @@ which this fork started from.
 4. `canonical_senders`: bare numbers become full JIDs, device parts are
    dropped, own messages follow the rule above and `sender_alt` is filled.
    Bare numbers whose server can't be determined are left and counted.
-
 5. `message_capture`: adds `messages.reply_to`, `edited_at`, `is_deleted`
    (default 0), `deleted_at` and `deleted_by`, and the `reactions` table. Only adds; no
    existing row changes.
+6. `direct_path_drop_status`: adds `messages.direct_path` and deletes the
+   `status@broadcast` chat and its messages (#19, #21).
 
 Migrations 3 and 4 need the device store and run only when logged in; they
 wait for a start after login otherwise. Migration 5 then waits behind them,
@@ -93,6 +129,11 @@ but its columns are added at start anyway so messages can be stored.
   unmigrated database still works, without them. Messages stored before the
   upgrade have no captions, reply IDs, reactions or edit/delete marks; a
   history re-sync fills in what WhatsApp sends again.
+- Media downloaded before this version keeps its old file name; new
+  downloads use the message ID.
+- The bridge now exits instead of idling when logged out or not connected
+  within 60 s. If you run it under a supervisor, let it restart on failure;
+  after a logout it needs `scripts/bridge.sh fg` and a QR scan.
 - Downgrading is not supported: an older bridge doesn't know the new schema
   or the UTC timestamps. To go back, stop the bridge and restore the `.bak`
   file from before the upgrade as `store/messages.db`.
