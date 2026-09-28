@@ -1,6 +1,8 @@
 package main
 
 import (
+	"time"
+
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waWeb"
 	wastore "go.mau.fi/whatsmeow/store"
@@ -24,17 +26,34 @@ type captureTarget struct {
 
 // processed describes what processMessage did, for logging.
 type processed struct {
-	kind                         string // "message", or "" if nothing was stored
+	kind                         string // "message", "reaction", or "" if nothing was stored
 	stored                       bool
+	targetID                     string // for a reaction: the message reacted to
 	content, mediaType, filename string
 }
 
-// processMessage stores one message (live or from history sync) under t.
+// processMessage stores one message (live or from history sync) under t:
+// a regular message as a messages row (with its reply context), a reaction
+// in the reactions table (#15).
 func processMessage(store *MessageStore, evt *events.Message, t captureTarget) (processed, error) {
 	var out processed
-	msg := evt.Message
+	msg := unwrapMessage(evt.Message)
 	info := evt.Info
 	chatJID := t.chat.String()
+
+	if r := msg.GetReactionMessage(); r != nil {
+		out.kind, out.targetID = "reaction", r.GetKey().GetID()
+		if out.targetID == "" {
+			return processed{}, nil
+		}
+		at := info.Timestamp
+		if ms := r.GetSenderTimestampMS(); ms > 0 {
+			at = time.UnixMilli(ms)
+		}
+		err := store.StoreReaction(chatJID, out.targetID, t.sender, r.GetText(), at)
+		out.stored = err == nil
+		return out, err
+	}
 
 	out.content = extractTextContent(msg)
 	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg)
@@ -50,10 +69,12 @@ func processMessage(store *MessageStore, evt *events.Message, t captureTarget) (
 	if err := store.StoreChat(chatJID, name, info.Timestamp); err != nil {
 		return out, err
 	}
-	err := store.StoreMessageWithAlt(
-		info.ID, chatJID, t.sender, t.senderAlt, out.content, info.Timestamp, info.IsFromMe,
-		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
-	)
+	err := store.storeMessageRow(messageRow{
+		id: info.ID, chatJID: chatJID, sender: t.sender, senderAlt: t.senderAlt, content: out.content,
+		timestamp: info.Timestamp, isFromMe: info.IsFromMe, mediaType: mediaType, filename: filename, url: url,
+		mediaKey: mediaKey, fileSHA256: fileSHA256, fileEncSHA256: fileEncSHA256, fileLength: fileLength,
+		replyTo: extractReplyTo(msg),
+	})
 	out.stored = err == nil
 	return out, err
 }

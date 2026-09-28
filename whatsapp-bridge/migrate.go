@@ -57,6 +57,7 @@ var migrations = []migration{
 	{version: 2, name: "sender_alt_column", run: migrateSenderAltColumn},
 	{version: 3, name: "canonical_chats", needsIdentity: true, run: migrateCanonicalChats},
 	{version: 4, name: "canonical_senders", needsIdentity: true, run: migrateCanonicalSenders},
+	{version: 5, name: "message_capture", run: migrateMessageCapture},
 }
 
 func (store *MessageStore) schemaVersion() (int, error) {
@@ -382,10 +383,28 @@ func mergeChatTx(tx *sql.Tx, from, to string) (bool, int, error) {
 	if _, err := tx.Exec("UPDATE messages SET chat_jid = ? WHERE chat_jid = ?", to, from); err != nil {
 		return false, 0, err
 	}
+	if err := moveReactionsTx(tx, from, to); err != nil {
+		return false, 0, err
+	}
 	if _, err := tx.Exec("DELETE FROM chats WHERE jid = ?", from); err != nil {
 		return false, 0, err
 	}
 	return existed, int(collisions), nil
+}
+
+// moveReactionsTx moves reactions from chat `from` to `to` (a chat merge),
+// keeping the copy already in `to` when a sender reacted in both. No-op when
+// the reactions table doesn't exist yet (migrations 3 and 4 on an old DB).
+func moveReactionsTx(tx *sql.Tx, from, to string) error {
+	var n int
+	if err := tx.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'reactions'").Scan(&n); err != nil || n == 0 {
+		return err
+	}
+	if _, err := tx.Exec("UPDATE OR IGNORE reactions SET chat_jid = ? WHERE chat_jid = ?", to, from); err != nil {
+		return err
+	}
+	_, err := tx.Exec("DELETE FROM reactions WHERE chat_jid = ?", from)
+	return err
 }
 
 // later reports whether stored time a is after b (NULL/unparsable counts as earliest).
@@ -520,4 +539,72 @@ func canonicaliseSendersTx(tx *sql.Tx, id *Identity, chatJID string, rep *migrat
 		}
 	}
 	return nil
+}
+
+// --- 5: message capture (#15, #16) -----------------------------------------
+
+// captureColumns are the messages columns migration 5 adds.
+var captureColumns = []struct{ name, def string }{
+	{"reply_to", "TEXT"},                         // ID of the quoted message (ContextInfo.StanzaID)
+	{"edited_at", "TIMESTAMP"},                   // time of the last applied edit, NULL if never edited
+	{"is_deleted", "INTEGER NOT NULL DEFAULT 0"}, // 1 once revoked ("deleted for everyone")
+	{"deleted_at", "TIMESTAMP"},                  // time of the revoke
+}
+
+// captureSchemaSQL creates the reactions table: one reaction per sender and
+// message; the message may not be stored (yet).
+const captureSchemaSQL = `CREATE TABLE IF NOT EXISTS reactions (
+	message_id TEXT NOT NULL,
+	chat_jid TEXT NOT NULL,
+	sender TEXT NOT NULL,
+	emoji TEXT NOT NULL,
+	timestamp TIMESTAMP,
+	PRIMARY KEY (message_id, chat_jid, sender)
+)`
+
+// migrateMessageCapture adds reply_to, edited_at, is_deleted, deleted_at and
+// the reactions table. Idempotent: existing columns are skipped.
+func migrateMessageCapture(tx *sql.Tx, _ *Identity, _ *migrationReport) error {
+	return addCaptureSchema(tx)
+}
+
+func addCaptureSchema(tx *sql.Tx) error {
+	for _, c := range captureColumns {
+		var n int
+		if err := tx.QueryRow("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = ?", c.name).Scan(&n); err != nil {
+			return err
+		}
+		if n > 0 {
+			continue
+		}
+		if _, err := tx.Exec("ALTER TABLE messages ADD COLUMN " + c.name + " " + c.def); err != nil {
+			return err
+		}
+	}
+	_, err := tx.Exec(captureSchemaSQL)
+	return err
+}
+
+// ensureCaptureSchemaEarly adds migration 5's columns and table without
+// recording the migration, when migration 5 is still pending (it waits
+// behind the identity migrations until after login). The changes only add
+// nullable/defaulted columns and a new table, so no backup is made; the
+// migration itself later finds them in place.
+func (store *MessageStore) ensureCaptureSchemaEarly() error {
+	current, err := store.schemaVersion()
+	if err != nil {
+		return err
+	}
+	if current >= 5 {
+		return nil
+	}
+	tx, err := store.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := addCaptureSchema(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
