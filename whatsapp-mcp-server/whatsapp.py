@@ -58,8 +58,17 @@ def _outbox_dir() -> str:
 
 
 def _send_allowed_dirs() -> List[str]:
-    """Outbox plus WHATSAPP_SEND_ALLOWED_DIRS entries, absolute with symlinks resolved."""
-    dirs = [_outbox_dir()] + [d for d in os.environ.get(SEND_ALLOWED_DIRS_ENV, "").split(os.pathsep) if d.strip()]
+    """Outbox plus WHATSAPP_SEND_ALLOWED_DIRS entries, with symlinks resolved.
+    Relative entries would depend on the working directory, so they are
+    skipped with a warning on stderr (stdout is the MCP transport)."""
+    dirs = [_outbox_dir()]
+    for d in os.environ.get(SEND_ALLOWED_DIRS_ENV, "").split(os.pathsep):
+        if not d.strip():
+            continue
+        if not os.path.isabs(d):
+            print(f"Warning: ignoring {SEND_ALLOWED_DIRS_ENV} entry {d!r}: must be an absolute path", file=sys.stderr)
+            continue
+        dirs.append(d)
     return [os.path.realpath(d) for d in dirs]
 
 

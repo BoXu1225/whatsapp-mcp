@@ -17,9 +17,9 @@ const outboxDirName = "outbox"
 const sendAllowedDirsEnv = "WHATSAPP_SEND_ALLOWED_DIRS"
 
 // sendAllowedDirs creates <storeDir>/outbox (0700) and returns it plus the
-// directories listed in WHATSAPP_SEND_ALLOWED_DIRS, all made absolute with
-// symlinks resolved. Extra entries that are empty or not existing
-// directories are skipped with a warning.
+// directories listed in WHATSAPP_SEND_ALLOWED_DIRS, with symlinks resolved.
+// Extra entries must be absolute; relative ones and ones that are not
+// existing directories are skipped with a warning (empty ones silently).
 func sendAllowedDirs(storeDir string) ([]string, error) {
 	outbox := filepath.Join(storeDir, outboxDirName)
 	if err := os.MkdirAll(outbox, 0o700); err != nil {
@@ -36,6 +36,10 @@ func sendAllowedDirs(storeDir string) ([]string, error) {
 
 	for _, d := range filepath.SplitList(os.Getenv(sendAllowedDirsEnv)) {
 		if strings.TrimSpace(d) == "" {
+			continue
+		}
+		if !filepath.IsAbs(d) {
+			fmt.Printf("Warning: ignoring %s entry %q: must be an absolute path\n", sendAllowedDirsEnv, d)
 			continue
 		}
 		r, err := resolveDir(d)
