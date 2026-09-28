@@ -142,10 +142,17 @@ func (store *MessageStore) InTx(fn func(tx *MessageStore) error) error {
 	return tx.Commit()
 }
 
+// statusBroadcastJID is where WhatsApp status updates are posted. They are
+// not a chat and are never stored (#21).
+const statusBroadcastJID = "status@broadcast"
+
 // Store a chat in the database. Times are stored in UTC. last_message_time
 // only moves forward (an older history chunk can arrive after newer
 // messages), and an empty name keeps the stored one.
 func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time) error {
+	if jid == statusBroadcastJID {
+		return nil
+	}
 	var last interface{}
 	if !lastMessageTime.IsZero() {
 		last = lastMessageTime.UTC()
@@ -197,8 +204,8 @@ type messageRow struct {
 // stored content, edited_at and deletion mark (#16), and an unknown
 // sender_alt or reply_to doesn't erase a known one.
 func (store *MessageStore) storeMessageRow(m messageRow) error {
-	// Only store if there's actual content or media
-	if m.content == "" && m.mediaType == "" {
+	// Only store if there's actual content or media; never status updates
+	if (m.content == "" && m.mediaType == "") || m.chatJID == statusBroadcastJID {
 		return nil
 	}
 
