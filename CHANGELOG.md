@@ -54,8 +54,16 @@ wait for a start after login otherwise.
 - Until the bridge has migrated, time filters on old rows may be off by the
   UTC offset.
 - A re-keyed chat's JID changes from `<phone>@s.whatsapp.net` to `<lid>@lid`.
-  Media already downloaded stays under the old `store/<phone JID>/` folder;
-  `download_media` with the new JID fetches it again.
+  Media already downloaded stays under the old `store/<phone JID>/` folder,
+  and `download_media` with the new JID finds it there.
+- A chat merged while the bridge runs (a message revealed the phone/LID
+  mapping) gets the same treatment as the migration, including canonical
+  senders for the moved messages. Each run that merges a chat this way writes
+  one more `store/messages.db.bak-<version>-<timestamp>` before its first
+  merge, so old backups can pile up; delete the ones you don't need.
+- Downgrading is not supported: an older bridge doesn't know the new schema
+  or the UTC timestamps. To go back, stop the bridge and restore the `.bak`
+  file from before the upgrade as `store/messages.db`.
 
 ## [0.2.0] - 2026-09-28
 
