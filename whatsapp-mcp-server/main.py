@@ -110,14 +110,15 @@ def list_messages(
 
     The first line says whether the bridge is up and how fresh the data is.
     Then one line per message, oldest first, each message once:
-      [time] Chat: <name> (<chat JID>) | ID: <message ID> | From: <sender name or Me>: <text>
+      [local time with UTC offset] Chat: <name> (<chat JID>) | ID: <message ID> | From: <sender name or Me>: <text>
     Media messages start with a [type] or [type: filename] tag; pass the ID and chat JID to download_media.
     limit/page select the newest matches (page 0 = most recent), printed oldest to newest.
     With context, lines starting with '>>' are the matches and the others are context.
     
     Args:
-        after: Optional ISO-8601 formatted string to only return messages after this date
-        before: Optional ISO-8601 formatted string to only return messages before this date
+        after: Optional ISO-8601 datetime; only messages after it. "Z" or an offset
+            ("+01:00") is honoured; without one it is local time.
+        before: Optional ISO-8601 datetime; only messages before it (same rules as after)
         sender_phone_number: Optional phone number, LID or JID to filter messages by sender (matches both PN and LID forms)
         chat_jid: Optional chat JID to filter messages by chat
         query: Optional search term to filter messages by content
@@ -194,6 +195,7 @@ def list_awaiting_reply(
 
     Args:
         since: Optional ISO-8601 datetime; only chats whose last message is at or after it
+            ("Z" or an offset is honoured; without one it is local time)
         include_groups: Also include group chats (default False: direct chats only)
         limit: Maximum number of chats to return (default 20)
     """
