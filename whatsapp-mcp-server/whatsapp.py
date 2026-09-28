@@ -4,7 +4,7 @@ import sqlite3
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 import requests
@@ -212,6 +212,8 @@ def _content_text(content: Optional[str], media_type: Optional[str], filename: O
 def format_message(message: Message, show_chat_info: bool = True, directory: Optional[contacts.Directory] = None, marker: str = "") -> str:
     """Format a single message as one line: time, chat, message ID, sender, content.
 
+    The time is local time with its UTC offset, e.g. 2024-03-31 02:30:00+01:00.
+
     `show_chat_info` is kept for compatibility; the chat is always shown so every
     line carries what download_media and get_message_context need.
     """
@@ -222,7 +224,7 @@ def format_message(message: Message, show_chat_info: bool = True, directory: Opt
     chat = f"{message.chat_name} ({message.chat_jid})" if message.chat_name else message.chat_jid
     content = _content_text(message.content, message.media_type, message.filename)
     return (
-        f"{marker}[{message.timestamp:%Y-%m-%d %H:%M:%S}] Chat: {chat} | ID: {message.id} | "
+        f"{marker}[{message.timestamp.isoformat(' ', 'seconds')}] Chat: {chat} | ID: {message.id} | "
         f"From: {sender_name}: {content}\n"
     )
 
@@ -263,7 +265,7 @@ _MESSAGE_FROM = "FROM messages m JOIN chats c ON m.chat_jid = c.jid"
 def _message_from_row(row: tuple, directory: contacts.Directory) -> Message:
     timestamp, sender, chat_name, content, is_from_me, chat_jid, msg_id, media_type, filename, _rowid = row
     return Message(
-        timestamp=datetime.fromisoformat(timestamp),
+        timestamp=_parse_db_time(timestamp),
         sender=sender,
         content=content,
         is_from_me=bool(is_from_me),
@@ -297,11 +299,39 @@ def _neighbours(conn: sqlite3.Connection, row: tuple, count: int, direction: str
 
 
 def _iso_param(name: str, value: str) -> str:
-    """Validate an ISO-8601 filter and format it like the stored timestamps compare."""
+    """Parse an ISO-8601 filter and format it as a stored (UTC) timestamp.
+
+    Accepts 'Z' and UTC offsets; a time without an offset is local time. The
+    bridge stores UTC text in go-sqlite3's format, so the result compares
+    correctly as text.
+    """
     try:
-        return datetime.fromisoformat(value).isoformat(" ")
-    except ValueError:
+        dt = datetime.fromisoformat(value.strip())
+    except (ValueError, AttributeError):
         raise ValueError(f"Invalid date format for '{name}': {value}. Please use ISO-8601 format.")
+    if dt.tzinfo is None:
+        dt = dt.astimezone()  # naive = local time
+    return _db_time_text(dt)
+
+
+def _db_time_text(dt: datetime) -> str:
+    """Format an aware datetime as the bridge stores it: UTC, go-sqlite3 layout."""
+    dt = dt.astimezone(timezone.utc)
+    frac = f".{dt.microsecond:06d}".rstrip("0") if dt.microsecond else ""
+    return dt.strftime("%Y-%m-%d %H:%M:%S") + frac + "+00:00"
+
+
+def _parse_db_time(value: Optional[str]) -> Optional[datetime]:
+    """A stored timestamp as an aware datetime in local time.
+
+    Handles UTC rows and rows an older bridge stored with a local offset.
+    """
+    if not value:
+        return None
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone()
 
 
 def list_messages(
@@ -505,13 +535,13 @@ def _chat_from_row(row: tuple, directory: contacts.Directory) -> Chat:
     return Chat(
         jid=jid,
         name=directory.chat_display_name(jid, name),
-        last_message_time=datetime.fromisoformat(last_time) if last_time else None,
+        last_message_time=_parse_db_time(last_time),
         last_message=_content_text(content, media_type, filename) if msg_id is not None else None,
         last_sender=sender,
         last_is_from_me=bool(is_from_me) if is_from_me is not None else None,
         last_message_id=msg_id,
         last_sender_name=last_sender_name,
-        last_message_at=datetime.fromisoformat(msg_time) if msg_time else None,
+        last_message_at=_parse_db_time(msg_time),
     )
 
 
