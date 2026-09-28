@@ -159,6 +159,16 @@ func main() {
 		logger.Errorf("Failed to restrict store permissions: %v", err)
 		return
 	}
+	// Bind the REST port before connecting: if another bridge already holds
+	// it, stop here rather than connect and kick that bridge's session.
+	restListener, err := listenREST(8080)
+	if err != nil {
+		logger.Errorf("Failed to start REST API server (is another bridge running?): %v", err)
+		messageStore.Close()
+		os.Exit(1)
+	}
+	defer restListener.Close()
+
 	if debugLogging {
 		logger.Warnf("Debug logging on: message content, names and file paths will be logged")
 	}
@@ -240,10 +250,7 @@ func main() {
 	api := newAPIServer(client, messageStore)
 	api.token = token
 	api.allowedDirs = allowedDirs
-	if err := startRESTServer(api, 8080); err != nil {
-		logger.Errorf("Failed to start REST API server: %v", err)
-		return
-	}
+	serveREST(api, restListener)
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)

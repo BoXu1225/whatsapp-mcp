@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -83,12 +84,15 @@ func TestEnsureBridgeTokenReplacesInvalidFile(t *testing.T) {
 	}
 }
 
-func TestStartRESTServerRecordsPortAndGuards(t *testing.T) {
+func TestServeRESTRecordsPortAndGuards(t *testing.T) {
 	s, sent := newTestAPIServer(t)
 	s.port = 0
-	if err := startRESTServer(s, 0); err != nil {
-		t.Fatalf("startRESTServer: %v", err)
+	ln, err := listenREST(0)
+	if err != nil {
+		t.Fatalf("listenREST: %v", err)
 	}
+	defer ln.Close()
+	serveREST(s, ln)
 	if s.port == 0 {
 		t.Fatal("port not recorded")
 	}
@@ -112,5 +116,18 @@ func TestStartRESTServerRecordsPortAndGuards(t *testing.T) {
 	}
 	if code := post(testToken); code != http.StatusOK || len(*sent) != 1 {
 		t.Errorf("valid request over TCP -> %d (sent %d), want 200 and one send", code, len(*sent))
+	}
+}
+
+func TestListenRESTFailsWhenPortTaken(t *testing.T) {
+	first, err := listenREST(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	port := first.Addr().(*net.TCPAddr).Port
+	if second, err := listenREST(port); err == nil {
+		second.Close()
+		t.Fatalf("second listenREST on port %d succeeded, want an error", port)
 	}
 }
