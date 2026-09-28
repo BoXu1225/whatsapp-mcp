@@ -226,7 +226,7 @@ func listenREST(port int) (net.Listener, error) {
 
 // serveREST serves the API on ln in the background. It records the bound
 // port on s, since the Host check needs it.
-func serveREST(s *apiServer, ln net.Listener) {
+func serveREST(s *apiServer, ln net.Listener) (*http.Server, <-chan error) {
 	s.port = ln.Addr().(*net.TCPAddr).Port
 	fmt.Printf("Starting REST API server on %s...\n", ln.Addr())
 
@@ -236,4 +236,5 @@ func serveREST(s *apiServer, ln net.Listener) {
 			fmt.Printf("REST API server error: %v\n", err)
 		}
 	}()
+	return srv, make(chan error) // TODO(#21) stub
 }
