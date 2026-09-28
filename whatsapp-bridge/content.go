@@ -49,8 +49,9 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 
 	// Check for document message
 	if doc := msg.GetDocumentMessage(); doc != nil {
-		filename := doc.GetFileName()
-		if filename == "" {
+		// The sender chooses this name: keep only a safe base name.
+		filename, ok := safeMediaFilename(doc.GetFileName())
+		if !ok {
 			filename = "document_" + time.Now().Format("20060102_150405")
 		}
 		return "document", filename,
