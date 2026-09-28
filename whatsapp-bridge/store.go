@@ -130,7 +130,9 @@ func (store *MessageStore) StoreMessageWithAlt(id, chatJID, sender, senderAlt, c
 // exists. Used when a phone-number chat turns out to belong to a LID chat.
 // Like the startup migrations, the first merge of a run backs the database up
 // first (unless this run already made a backup); if that fails, nothing is merged.
-func (store *MessageStore) MergeChat(from, to string) error {
+// The moved rows then get canonical senders for their new chat (as in
+// migration 4), using id.
+func (store *MessageStore) MergeChat(from, to string, id Identity) error {
 	if from == to || from == "" {
 		return nil
 	}
@@ -150,6 +152,10 @@ func (store *MessageStore) MergeChat(from, to string) error {
 	}
 	defer tx.Rollback()
 	if _, _, err := mergeChatTx(tx, from, to); err != nil {
+		return err
+	}
+	var rep migrationReport
+	if err := canonicaliseSendersTx(tx, &id, to, &rep); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -318,7 +318,7 @@ func TestLiveMergeBacksUpFirst(t *testing.T) {
 	if err := store.StoreChat(dan.String(), "Dan Example", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.MergeChat(dan.String(), "100000000000004@lid"); err != nil {
+	if err := store.MergeChat(dan.String(), "100000000000004@lid", testIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	if b := backups(t, dir); len(b) != 1 {

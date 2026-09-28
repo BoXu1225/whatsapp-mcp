@@ -404,6 +404,13 @@ func later(a, b sql.NullString) bool {
 // --- 4: canonical senders (#8) ---------------------------------------------
 
 func migrateCanonicalSenders(tx *sql.Tx, id *Identity, rep *migrationReport) error {
+	return canonicaliseSendersTx(tx, id, "", rep)
+}
+
+// canonicaliseSendersTx rewrites sender and sender_alt to the canonical form
+// (see identity.go) for all messages, or only those in chatJID if it is set.
+// Used by migration 4 and after a runtime chat merge.
+func canonicaliseSendersTx(tx *sql.Tx, id *Identity, chatJID string, rep *migrationReport) error {
 	// Users with a direct chat, by server; "" when they have both kinds.
 	chatUsers := map[string]string{}
 	crows, err := tx.Query("SELECT jid FROM chats")
@@ -431,7 +438,13 @@ func migrateCanonicalSenders(tx *sql.Tx, id *Identity, rep *migrationReport) err
 		return err
 	}
 
-	rows, err := tx.Query("SELECT rowid, chat_jid, COALESCE(sender, ''), COALESCE(sender_alt, ''), COALESCE(is_from_me, 0) FROM messages")
+	query := "SELECT rowid, chat_jid, COALESCE(sender, ''), COALESCE(sender_alt, ''), COALESCE(is_from_me, 0) FROM messages"
+	var args []interface{}
+	if chatJID != "" {
+		query += " WHERE chat_jid = ?"
+		args = append(args, chatJID)
+	}
+	rows, err := tx.Query(query, args...)
 	if err != nil {
 		return err
 	}
