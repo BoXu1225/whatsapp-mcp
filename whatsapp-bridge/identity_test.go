@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
@@ -265,5 +267,49 @@ func TestLiveMessageMergesExistingPNChat(t *testing.T) {
 	}
 	if got := chatRows(t, store); len(got) != 1 || got[carolLID+"@lid"] != 3 {
 		t.Fatalf("chats = %v, want one chat %s@lid with 3 messages", got, carolLID)
+	}
+}
+
+// The first live merge of a run backs the database up first (like the startup
+// migrations); later merges in the same run don't make another copy.
+func TestLiveMergeBacksUpFirst(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewMessageStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	logger := waLog.Stdout("Test", "ERROR", false)
+	storeHistorySync(store, Identity{}, carolHistorySync(carolPN+"@s.whatsapp.net", ""), fixedName("Carol Example"), logger)
+	if b := backups(t, dir); len(b) != 0 {
+		t.Fatalf("backup before any merge: %v", b)
+	}
+
+	if _, err := storeLiveMessage(store, testIdentity(), carolLiveMessage(), fixedName("Carol Example")); err != nil {
+		t.Fatal(err)
+	}
+	b := backups(t, dir)
+	if len(b) != 1 {
+		t.Fatalf("backups after live merge = %v, want one", b)
+	}
+	bak, err := sql.Open("sqlite3", "file:"+b[0]+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bak.Close()
+	if got := queryStrings(t, bak, "SELECT jid FROM chats"); strings.Join(got, ",") != carolPN+"@s.whatsapp.net" {
+		t.Errorf("backup chats = %v, want the pre-merge PN chat", got)
+	}
+
+	// Another PN chat merged later in the run: no second backup.
+	dan := types.JID{User: danPN, Server: types.DefaultUserServer}
+	if err := store.StoreChat(dan.String(), "Dan Example", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MergeChat(dan.String(), "100000000000004@lid"); err != nil {
+		t.Fatal(err)
+	}
+	if b := backups(t, dir); len(b) != 1 {
+		t.Errorf("backups after second merge = %v, want still one", b)
 	}
 }
