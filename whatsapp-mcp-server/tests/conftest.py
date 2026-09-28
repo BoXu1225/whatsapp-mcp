@@ -71,10 +71,15 @@ OWN_JID = "15550000000@s.whatsapp.net"
 
 
 def bridge_timestamp(dt: datetime) -> str:
-    """Format a datetime the way go-sqlite3 stores a Go time.Time."""
+    """Format a datetime the way go-sqlite3 stores a Go time.Time.
+
+    go-sqlite3 uses the layout "2006-01-02 15:04:05.999999999-07:00": fractional
+    seconds with trailing zeros trimmed, omitted entirely when zero.
+    """
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.isoformat(sep=" ")
+    frac = f".{dt.microsecond:06d}".rstrip("0") if dt.microsecond else ""
+    return dt.strftime("%Y-%m-%d %H:%M:%S") + frac + dt.isoformat()[-6:]
 
 
 class FakeMessagesDB:
@@ -122,14 +127,21 @@ class FakeWhatsmeowDB:
 
 
 @pytest.fixture(autouse=True)
-def no_bridge_http(monkeypatch):
-    """Fail any test that tries to talk to the bridge REST API."""
+def isolate_from_real_bridge(monkeypatch, tmp_path):
+    """Keep every test away from the real bridge.
+
+    MESSAGES_DB_PATH points at a path that doesn't exist (messages_db overrides
+    it), so a test that forgets the fixture can never read the real store, and
+    HTTP calls fail instead of reaching the bridge REST API.
+    """
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(tmp_path / "missing" / "messages.db"))
 
     def blocked(*args, **kwargs):
         raise AssertionError("tests must not make HTTP requests to the bridge")
 
     for name in ("get", "post", "put", "delete", "request"):
         monkeypatch.setattr(requests, name, blocked)
+    monkeypatch.setattr(requests.sessions.Session, "request", blocked)
 
 
 @pytest.fixture
