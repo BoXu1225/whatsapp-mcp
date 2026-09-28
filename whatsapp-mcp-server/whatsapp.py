@@ -868,46 +868,52 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
         if converted and os.path.exists(converted):
             os.unlink(converted)
 
-def download_media(message_id: str, chat_jid: str) -> Optional[str]:
-    """Download media from a message and return the local file path.
-    
-    Args:
-        message_id: The ID of the message containing the media
-        chat_jid: The JID of the chat containing the message
-    
-    Returns:
-        The local file path if download was successful, None otherwise
+def download_media_result(message_id: str, chat_jid: str) -> dict:
+    """Ask the bridge to download a message's media.
+
+    Returns {"success", "message"} plus "file_path" and "original_filename" on
+    success, or "retry_requested": True when the media had expired and the
+    bridge asked the sender's phone to upload it again (HTTP 202; try again
+    shortly). Diagnostics go to stderr: stdout is the MCP stdio transport.
     """
     try:
-        payload = {
-            "message_id": message_id,
-            "chat_jid": chat_jid
-        }
-
-        response = _bridge_post("download", payload)
-        
-        if response.status_code == 200:
-            result = response.json()
-            if result.get("success", False):
-                path = result.get("path")
-                print(f"Media downloaded successfully: {path}", file=sys.stderr)
-                return path
-            else:
-                print(f"Download failed: {result.get('message', 'Unknown error')}", file=sys.stderr)
-                return None
-        else:
-            print(f"Error: HTTP {response.status_code} - {response.text}", file=sys.stderr)
-            return None
-            
+        response = _bridge_post("download", {"message_id": message_id, "chat_jid": chat_jid})
     except BridgeTokenError as e:
-        print(str(e), file=sys.stderr)  # stdout is the MCP stdio transport
-        return None
+        print(str(e), file=sys.stderr)
+        return {"success": False, "message": str(e)}
     except requests.RequestException as e:
         print(f"Request error: {str(e)}", file=sys.stderr)
-        return None
-    except json.JSONDecodeError:
-        print(f"Error parsing response: {response.text}", file=sys.stderr)
-        return None
+        return {"success": False, "message": f"Could not reach the WhatsApp bridge: {e}"}
     except Exception as e:
         print(f"Unexpected error: {str(e)}", file=sys.stderr)
-        return None
+        return {"success": False, "message": f"Unexpected error: {e}"}
+
+    try:
+        body = response.json()
+    except (ValueError, json.JSONDecodeError):
+        body = None
+    if not isinstance(body, dict):
+        print(f"Error: HTTP {response.status_code} - {response.text}", file=sys.stderr)
+        return {"success": False, "message": f"Bridge returned HTTP {response.status_code}: {response.text}"}
+
+    message = body.get("message") or f"HTTP {response.status_code}"
+    if response.status_code == 200 and body.get("success"):
+        path = body.get("path")
+        print(f"Media downloaded successfully: {path}", file=sys.stderr)
+        result = {"success": True, "message": message, "file_path": path}
+        if body.get("original_filename"):
+            result["original_filename"] = body["original_filename"]
+        return result
+    if response.status_code == 202 and body.get("retry_requested"):
+        print(f"Media retry requested: {message}", file=sys.stderr)
+        return {"success": False, "retry_requested": True, "message": message}
+    print(f"Download failed: HTTP {response.status_code} - {message}", file=sys.stderr)
+    return {"success": False, "message": message}
+
+
+def download_media(message_id: str, chat_jid: str) -> Optional[str]:
+    """Download media from a message and return the local file path, or None.
+
+    See download_media_result for the bridge's full answer.
+    """
+    return download_media_result(message_id, chat_jid).get("file_path")
