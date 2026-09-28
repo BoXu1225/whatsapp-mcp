@@ -85,7 +85,7 @@ func TestIdentityMigrationMergesChatsAndNormalisesSenders(t *testing.T) {
 		"c2":  {carol, meLID, mePN},
 		"dup": {carol, carol, carolAlt},
 		"p1":  {carol, carol, carolAlt}, // the other person in a 1:1 chat: the chat's form
-		"p2":  {carol, meLID, mePN}, // own message now in a LID chat
+		"p2":  {carol, meLID, mePN},     // own message now in a LID chat
 		"d1":  {dan, dan, ""},
 		"d2":  {dan, mePN, meLID},
 		"g1":  {group, carolAlt, carol},

@@ -15,52 +15,88 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
-// Handle regular incoming messages with media support
-func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) {
-	// Save message to database
-	chatJID := msg.Info.Chat.String()
-	sender := msg.Info.Sender.User
+// chatNamer returns the display name to store for a chat. conversation is the
+// history-sync conversation, or nil for live messages.
+type chatNamer func(jid types.JID, conversation interface{}) string
 
-	// Get appropriate chat name (pass nil for conversation since we don't have one for regular messages)
-	name := GetChatName(client, messageStore, msg.Info.Chat, chatJID, nil, sender, logger)
+func clientChatNamer(client *whatsmeow.Client, messageStore *MessageStore, logger waLog.Logger) chatNamer {
+	return func(jid types.JID, conversation interface{}) string {
+		return GetChatName(client, messageStore, jid, jid.String(), conversation, "", logger)
+	}
+}
+
+// liveStored describes a stored live message, for logging.
+type liveStored struct {
+	stored                     bool
+	chatJID, sender            string
+	content, mediaType, fileNm string
+}
+
+// storeLiveMessage stores a live message under its canonical chat and sender
+// JIDs (identity.go). A phone-number chat for the same person is merged into
+// the canonical LID chat first.
+func storeLiveMessage(messageStore *MessageStore, id Identity, msg *events.Message, name chatNamer) (liveStored, error) {
+	info := msg.Info
+	// Hints for the chat's LID: in a 1:1 chat, the other side's alt address.
+	var hints []types.JID
+	if info.Chat.Server == types.DefaultUserServer {
+		if info.IsFromMe {
+			hints = append(hints, info.RecipientAlt)
+		} else {
+			hints = append(hints, info.SenderAlt)
+		}
+	}
+	chat := id.CanonicalChat(info.Chat, hints...)
+	chatJID := chat.String()
+	if chat.Server == types.HiddenUserServer {
+		pn := info.Chat.ToNonAD()
+		if pn.Server != types.DefaultUserServer {
+			pn = id.Alt(chat)
+		}
+		if !pn.IsEmpty() {
+			if err := messageStore.MergeChat(pn.String(), chatJID); err != nil {
+				return liveStored{}, fmt.Errorf("failed to merge chat %s into %s: %v", pn, chatJID, err)
+			}
+		}
+	}
+	sender, senderAlt := id.LiveSender(info, chat)
+	out := liveStored{chatJID: chatJID, sender: sender}
 
 	// Update chat in database with the message timestamp (keeps last message time updated)
-	err := messageStore.StoreChat(chatJID, name, msg.Info.Timestamp)
-	if err != nil {
-		logger.Warnf("Failed to store chat: %v", err)
+	if err := messageStore.StoreChat(chatJID, name(chat, nil), info.Timestamp); err != nil {
+		return out, fmt.Errorf("failed to store chat: %v", err)
 	}
 
-	// Extract text content
-	content := extractTextContent(msg.Message)
-
-	// Extract media info
+	out.content = extractTextContent(msg.Message)
 	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message)
+	out.mediaType, out.fileNm = mediaType, filename
 
 	// Skip if there's no content and no media
-	if content == "" && mediaType == "" {
-		return
+	if out.content == "" && mediaType == "" {
+		return out, nil
 	}
 
-	// Store message in database
-	err = messageStore.StoreMessage(
-		msg.Info.ID,
-		chatJID,
-		sender,
-		content,
-		msg.Info.Timestamp,
-		msg.Info.IsFromMe,
-		mediaType,
-		filename,
-		url,
-		mediaKey,
-		fileSHA256,
-		fileEncSHA256,
-		fileLength,
+	err := messageStore.StoreMessageWithAlt(
+		info.ID, chatJID, sender, senderAlt, out.content, info.Timestamp, info.IsFromMe,
+		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
 	)
+	out.stored = err == nil
+	return out, err
+}
+
+// Handle regular incoming messages with media support
+func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) {
+	res, err := storeLiveMessage(messageStore, clientIdentity(client), msg, clientChatNamer(client, messageStore, logger))
+	chatJID, sender := res.chatJID, res.sender
+	content, mediaType, filename := res.content, res.mediaType, res.fileNm
+	if err == nil && !res.stored {
+		return
+	}
 
 	if err != nil {
 		logger.Warnf("Failed to store message: %v", err)
@@ -137,13 +173,25 @@ func main() {
 		return
 	}
 
-	// Initialize message store
+	// Initialize message store (runs pending schema migrations; see migrate.go)
 	messageStore, err := NewMessageStore()
 	if err != nil {
 		logger.Errorf("Failed to initialize message store: %v", err)
-		return
+		os.Exit(1)
 	}
 	defer messageStore.Close()
+
+	// Migrations that need our JIDs and the LID map. The device store is
+	// loaded, so this works before connecting.
+	if client.Store.ID != nil {
+		if _, err := messageStore.MigrateIdentity(clientIdentity(client)); err != nil {
+			logger.Errorf("Failed to migrate message store: %v", err)
+			messageStore.Close()
+			os.Exit(1)
+		}
+	} else if pending, err := messageStore.PendingIdentityMigrations(); err == nil && pending {
+		logger.Warnf("Not logged in yet: chat/sender identity migrations will run on the next start after login")
+	}
 
 	// API token and send allowlist (see security.go, allowlist.go)
 	token, err := ensureBridgeToken("store")
