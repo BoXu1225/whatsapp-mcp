@@ -84,3 +84,27 @@ def test_whatsmeow_fixture(whatsmeow_db):
         assert conn.execute("SELECT pn FROM whatsmeow_lid_map WHERE lid = ?", ("100000000000002",)).fetchone() == (
             "15550000002",
         )
+
+
+def test_default_db_path_is_isolated(tmp_path):
+    assert whatsapp.MESSAGES_DB_PATH == str(tmp_path / "missing" / "messages.db")
+    assert whatsapp.list_chats() == []
+
+
+def test_http_is_blocked():
+    import pytest
+    import requests
+
+    with pytest.raises(AssertionError):
+        requests.Session().post("http://127.0.0.1:1/api/send")
+
+
+def test_bridge_timestamp_matches_go_sqlite3():
+    from datetime import datetime, timedelta, timezone
+
+    from conftest import bridge_timestamp
+
+    assert bridge_timestamp(datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone.utc)) == "2024-01-02 03:04:05+00:00"
+    assert bridge_timestamp(datetime(2024, 1, 2, 3, 4, 5, 120000, tzinfo=timezone.utc)) == "2024-01-02 03:04:05.12+00:00"
+    tz = timezone(timedelta(hours=-5))
+    assert bridge_timestamp(datetime(2024, 1, 2, 3, 4, 5, tzinfo=tz)) == "2024-01-02 03:04:05-05:00"
