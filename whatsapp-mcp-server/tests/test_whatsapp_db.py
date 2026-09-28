@@ -42,7 +42,7 @@ def test_search_contacts_skips_groups(seeded_db):
 def test_get_chat(seeded_db):
     chat = whatsapp.get_chat(BOB)
     assert chat.name == "Bob Example"
-    assert chat.last_message == "photo"
+    assert chat.last_message == "[image: image_1.jpg] photo"
     assert whatsapp.get_chat("15550009999@s.whatsapp.net") is None
 
 
@@ -66,7 +66,7 @@ def test_list_messages_formats_output(seeded_db):
 
 def test_list_messages_shows_media_marker(seeded_db):
     out = whatsapp.list_messages(chat_jid=BOB, include_context=False)
-    assert "ID: b1 | From: Bob Example: [image] photo" in out
+    assert "ID: b1 | From: Bob Example: [image: image_1.jpg] photo" in out
 
 
 def test_get_sender_name(seeded_db):

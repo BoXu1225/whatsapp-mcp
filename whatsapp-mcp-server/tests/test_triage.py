@@ -87,7 +87,7 @@ def media_db(seeded_db):
 
 
 def test_media_only_filter(media_db):
-    out = whatsapp.list_messages(media_only=True)
+    out = whatsapp.list_messages(media_only=True, include_context=False)
     assert "ID: b1" in out and "ID: b2" in out and "ID: b3" in out
     assert "ID: b4" not in out and "ID: a1" not in out
 

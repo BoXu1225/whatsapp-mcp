@@ -160,6 +160,7 @@ class Chat:
     last_is_from_me: Optional[bool] = None
     last_message_id: Optional[str] = None
     last_sender_name: Optional[str] = None
+    last_message_at: Optional[datetime] = None  # timestamp of last_message
 
     @property
     def is_group(self) -> bool:
@@ -200,11 +201,11 @@ def get_sender_name(sender_jid: str, directory: Optional[contacts.Directory] = N
 
 
 def _content_text(content: Optional[str], media_type: Optional[str], filename: Optional[str] = None) -> str:
-    """Message text, with a [media_type] tag in front of media messages."""
+    """Message text; media messages start with a [type] or [type: filename] tag."""
     content = content or ""
     if not media_type:
         return content
-    tag = f"[{media_type}]"
+    tag = f"[{media_type}: {filename}]" if filename else f"[{media_type}]"
     return f"{tag} {content}" if content else tag
 
 
@@ -313,14 +314,17 @@ def list_messages(
     page: int = 0,
     include_context: Optional[bool] = None,
     context_before: int = 1,
-    context_after: int = 1
+    context_after: int = 1,
+    media_only: bool = False,
+    media_type: Optional[str] = None,
 ) -> str:
     """Get messages matching the criteria, formatted one per line, oldest first.
 
     `limit`/`page` select matches newest-first (page 0 is the most recent
     `limit` matches); the page is then printed oldest to newest. Each message
     appears once. include_context defaults to False when chat_jid is set and
-    True otherwise; with context, matches are marked '>>'.
+    True otherwise; with context, matches are marked '>>'. media_only keeps
+    only media messages; media_type (e.g. "image", "document") one media type.
     """
     if include_context is None:
         include_context = chat_jid is None
@@ -348,6 +352,11 @@ def list_messages(
         if query:
             where_clauses.append("LOWER(m.content) LIKE LOWER(?)")
             params.append(f"%{query}%")
+        if media_type:
+            where_clauses.append("LOWER(m.media_type) = LOWER(?)")
+            params.append(media_type)
+        elif media_only:
+            where_clauses.append("COALESCE(m.media_type, '') != ''")
 
         where = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
         matches = conn.execute(
@@ -483,11 +492,12 @@ def _chat_from_row(row: tuple, directory: contacts.Directory) -> Chat:
         jid=jid,
         name=directory.chat_display_name(jid, name),
         last_message_time=datetime.fromisoformat(last_time) if last_time else None,
-        last_message=content,
+        last_message=_content_text(content, media_type, filename) if msg_id is not None else None,
         last_sender=sender,
         last_is_from_me=bool(is_from_me) if is_from_me is not None else None,
         last_message_id=msg_id,
         last_sender_name=last_sender_name,
+        last_message_at=datetime.fromisoformat(msg_time) if msg_time else None,
     )
 
 
@@ -529,6 +539,51 @@ def get_last_interaction(jid: str) -> Optional[str]:
         if not row:
             return None
         return format_message(_message_from_row(row, directory), directory=directory)
+
+
+def list_awaiting_reply(since: Optional[str] = None, include_groups: bool = False, limit: int = 20) -> List[Chat]:
+    """Chats whose newest stored message is not from me, newest first.
+
+    Direct chats (phone and LID JIDs) only, plus groups with include_groups.
+    Broadcasts and newsletters are never included. `since` (ISO-8601) keeps
+    chats whose last message is at or after that time. Each chat's
+    last_message is a preview (media shown as a [type: filename] tag).
+    """
+    servers = ["%@s.whatsapp.net", "%@lid"] + (["%@g.us"] if include_groups else [])
+    where = ["r.rn = 1", "COALESCE(lm.is_from_me, 0) = 0", "(" + " OR ".join("c.jid LIKE ?" for _ in servers) + ")"]
+    params: list = list(servers)
+    if since:
+        where.append("lm.timestamp >= ?")
+        params.append(_iso_param("since", since))
+
+    with _connect() as conn:
+        directory = load_directory(conn)
+        rows = conn.execute(
+            f"""
+            WITH ranked AS (
+                SELECT rowid AS rid,
+                       ROW_NUMBER() OVER (PARTITION BY chat_jid ORDER BY timestamp DESC, rowid DESC) AS rn
+                FROM messages
+            )
+            SELECT c.jid, c.name, c.last_message_time,
+                   lm.content, lm.sender, lm.is_from_me, lm.id, lm.timestamp, lm.media_type, lm.filename
+            FROM ranked r
+            JOIN messages lm ON lm.rowid = r.rid
+            JOIN chats c ON c.jid = lm.chat_jid
+            WHERE {" AND ".join(where)}
+            ORDER BY lm.timestamp DESC, lm.rowid DESC
+            LIMIT ?
+            """,
+            (*params, limit),
+        ).fetchall()
+        chats = [_chat_from_row(row, directory) for row in rows]
+    for chat in chats:
+        if chat.last_message and len(chat.last_message) > PREVIEW_LENGTH:
+            chat.last_message = chat.last_message[:PREVIEW_LENGTH] + "..."
+    return chats
+
+
+PREVIEW_LENGTH = 200
 
 
 def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]:
