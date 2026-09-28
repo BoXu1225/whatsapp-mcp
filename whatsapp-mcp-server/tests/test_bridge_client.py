@@ -102,6 +102,15 @@ def test_missing_token_download_returns_none(bridge_store, posts):
     assert posts == []
 
 
+def test_missing_token_download_error_not_on_stdout(bridge_store, posts, capsys):
+    """stdout is the MCP stdio transport; the token error must go to stderr."""
+    (bridge_store / "bridge_token").unlink()
+    whatsapp.download_media("m1", RECIPIENT + "@s.whatsapp.net")
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "bridge_token" in err
+
+
 # --- #2: send allowlist ----------------------------------------------------
 
 
