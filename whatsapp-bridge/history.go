@@ -13,6 +13,13 @@ import (
 
 // Handle history sync events
 func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, historySync *events.HistorySync, logger waLog.Logger) {
+	storeHistorySync(messageStore, clientIdentity(client), historySync, clientChatNamer(client, messageStore, logger), logger)
+}
+
+// storeHistorySync stores history-sync conversations under their canonical
+// chat and sender JIDs (identity.go), merging a phone-number chat for the
+// same person into the canonical LID chat.
+func storeHistorySync(messageStore *MessageStore, id Identity, historySync *events.HistorySync, name chatNamer, logger waLog.Logger) {
 	fmt.Printf("Received history sync event with %d conversations\n", len(historySync.Data.Conversations))
 
 	syncedCount := 0
@@ -22,17 +29,35 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 			continue
 		}
 
-		chatJID := *conversation.ID
-
 		// Try to parse the JID
-		jid, err := types.ParseJID(chatJID)
+		convJID, err := types.ParseJID(*conversation.ID)
 		if err != nil {
-			logger.Warnf("Failed to parse JID %s: %v", chatJID, err)
+			logger.Warnf("Failed to parse JID %s: %v", *conversation.ID, err)
 			continue
 		}
 
-		// Get appropriate chat name by passing the history sync conversation directly
-		name := GetChatName(client, messageStore, jid, chatJID, conversation, "", logger)
+		var lidHint types.JID
+		if l, err := types.ParseJID(conversation.GetLidJID()); err == nil {
+			lidHint = l
+		}
+		jid := id.CanonicalChat(convJID, lidHint)
+		chatJID := jid.String()
+		if jid.Server == types.HiddenUserServer {
+			pn := convJID.ToNonAD()
+			if pn.Server != types.DefaultUserServer {
+				pn = id.Alt(jid)
+				if pn.IsEmpty() {
+					if p, err := types.ParseJID(conversation.GetPnJID()); err == nil {
+						pn = p.ToNonAD()
+					}
+				}
+			}
+			if pn.Server == types.DefaultUserServer && pn.User != "" {
+				if err := messageStore.MergeChat(pn.String(), chatJID); err != nil {
+					logger.Warnf("Failed to merge chat %s into %s: %v", pn, chatJID, err)
+				}
+			}
+		}
 
 		// Process messages
 		messages := conversation.Messages
@@ -51,7 +76,10 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				continue
 			}
 
-			messageStore.StoreChat(chatJID, name, timestamp)
+			// Get appropriate chat name by passing the history sync conversation directly
+			if err := messageStore.StoreChat(chatJID, name(jid, conversation), timestamp); err != nil {
+				logger.Warnf("Failed to store chat: %v", err)
+			}
 
 			// Store messages
 			for _, msg := range messages {
@@ -84,28 +112,11 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				}
 
 				// Determine sender
-				var sender string
-				isFromMe := false
-				if msg.Message.Key != nil {
-					if msg.Message.Key.FromMe != nil {
-						isFromMe = *msg.Message.Key.FromMe
-					}
-					if !isFromMe && msg.Message.Key.Participant != nil && *msg.Message.Key.Participant != "" {
-						sender = *msg.Message.Key.Participant
-					} else if isFromMe {
-						sender = client.Store.ID.User
-					} else {
-						sender = jid.User
-					}
-				} else {
-					sender = jid.User
-				}
+				isFromMe := msg.Message.GetKey().GetFromMe()
+				sender, senderAlt := id.HistorySender(jid, isFromMe, msg.Message.GetKey().GetParticipant())
 
 				// Store message
-				msgID := ""
-				if msg.Message.Key != nil && msg.Message.Key.ID != nil {
-					msgID = *msg.Message.Key.ID
-				}
+				msgID := msg.Message.GetKey().GetID()
 
 				// Get message timestamp
 				timestamp := time.Time{}
@@ -115,10 +126,11 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					continue
 				}
 
-				err = messageStore.StoreMessage(
+				err = messageStore.StoreMessageWithAlt(
 					msgID,
 					chatJID,
 					sender,
+					senderAlt,
 					content,
 					timestamp,
 					isFromMe,

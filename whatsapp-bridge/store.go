@@ -19,8 +19,9 @@ type Message struct {
 
 // Database handler for storing message history
 type MessageStore struct {
-	db  *sql.DB
-	dir string // store directory; downloaded media is saved under it
+	db         *sql.DB
+	dir        string // store directory; downloaded media is saved under it
+	backupPath string // backup made before this process's first migration, if any
 }
 
 // Initialize message store
@@ -28,7 +29,10 @@ func NewMessageStore() (*MessageStore, error) {
 	return NewMessageStoreAt("store")
 }
 
-// NewMessageStoreAt opens (creating if needed) messages.db inside dir.
+// NewMessageStoreAt opens (creating if needed) messages.db inside dir and
+// runs the pending migrations that don't need the device identity (see
+// migrate.go). On a migration error the store is closed and the error names
+// the backup.
 func NewMessageStoreAt(dir string) (*MessageStore, error) {
 	// Create directory for database if it doesn't exist
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -72,7 +76,12 @@ func NewMessageStoreAt(dir string) (*MessageStore, error) {
 		return nil, fmt.Errorf("failed to create tables: %v", err)
 	}
 
-	return &MessageStore{db: db, dir: dir}, nil
+	store := &MessageStore{db: db, dir: dir}
+	if _, err := store.migrate(nil); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return store, nil
 }
 
 // Close the database connection
@@ -80,17 +89,26 @@ func (store *MessageStore) Close() error {
 	return store.db.Close()
 }
 
-// Store a chat in the database
+// Store a chat in the database. Times are stored in UTC.
 func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time) error {
 	_, err := store.db.Exec(
 		"INSERT OR REPLACE INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)",
-		jid, name, lastMessageTime,
+		jid, name, lastMessageTime.UTC(),
 	)
 	return err
 }
 
-// Store a message in the database
+// Store a message in the database, with no sender_alt.
 func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
+	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
+	return store.StoreMessageWithAlt(id, chatJID, sender, "", content, timestamp, isFromMe,
+		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength)
+}
+
+// StoreMessageWithAlt stores a message. sender is the canonical sender JID and
+// senderAlt its other form ("" if unknown); see identity.go. The timestamp is
+// stored in UTC.
+func (store *MessageStore) StoreMessageWithAlt(id, chatJID, sender, senderAlt, content string, timestamp time.Time, isFromMe bool,
 	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
 	// Only store if there's actual content or media
 	if content == "" && mediaType == "" {
@@ -98,12 +116,36 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 	}
 
 	_, err := store.db.Exec(
-		`INSERT OR REPLACE INTO messages 
-		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length) 
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
+		`INSERT OR REPLACE INTO messages
+		(id, chat_jid, sender, sender_alt, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length)
+		VALUES (?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, chatJID, sender, senderAlt, content, timestamp.UTC(), isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
 	)
 	return err
+}
+
+// MergeChat moves chat `from` into chat `to` (see mergeChatTx) if `from`
+// exists. Used when a phone-number chat turns out to belong to a LID chat.
+func (store *MessageStore) MergeChat(from, to string) error {
+	if from == to || from == "" {
+		return nil
+	}
+	var one int
+	if err := store.db.QueryRow("SELECT 1 FROM chats WHERE jid = ?", from).Scan(&one); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	tx, err := store.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, _, err := mergeChatTx(tx, from, to); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Get messages from a chat
