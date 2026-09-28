@@ -178,7 +178,7 @@ func TestHistoryUnwrapsWrappedMessages(t *testing.T) {
 	want := map[string]struct{ content, mediaType string }{
 		"W1": {"disappearing hello", ""},
 		"W2": {"", "image"},
-		"W3": {"", "document"}, // the caption: see TestCaptureMessageTypes (#15)
+		"W3": {"the plan", "document"},
 		"W4": {"see https://example.com", ""},
 	}
 	for id, w := range want {
