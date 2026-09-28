@@ -1,4 +1,4 @@
-module whatsapp-client
+module github.com/BoXu1225/whatsapp-mcp/whatsapp-bridge
 
 go 1.26.0
 
