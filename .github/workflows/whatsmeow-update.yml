@@ -1,0 +1,79 @@
+# WhatsApp rejects clients whose protocol version is too old (405 "client
+# outdated"), and whatsmeow ships fixes as commits on main, not releases.
+# Once a week (or on demand) this moves the bridge to whatsmeow@main, runs
+# vet, build and the tests, and opens or updates a PR if anything changed.
+# If the build or tests fail, no PR is opened and the failed run is reported
+# like any other failed workflow.
+#
+# Needs Settings > Actions > General > "Allow GitHub Actions to create and
+# approve pull requests". PRs opened with GITHUB_TOKEN don't trigger the CI
+# workflow; this job already ran the Go checks, and closing and reopening the
+# PR runs CI as well.
+name: Update whatsmeow
+
+on:
+  schedule:
+    - cron: "23 6 * * 1" # Mondays 06:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: whatsmeow-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: whatsmeow@main
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    defaults:
+      run:
+        working-directory: whatsapp-bridge
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: whatsapp-bridge/go.mod
+          cache-dependency-path: whatsapp-bridge/go.sum
+
+      - name: Update whatsmeow to main
+        id: update
+        run: |
+          old=$(go list -m -f '{{.Version}}' go.mau.fi/whatsmeow)
+          go get go.mau.fi/whatsmeow@main
+          go mod tidy
+          new=$(go list -m -f '{{.Version}}' go.mau.fi/whatsmeow)
+          echo "old=$old" >> "$GITHUB_OUTPUT"
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          echo "whatsmeow: $old -> $new"
+
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test ./...
+
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: deps/whatsmeow
+          delete-branch: true
+          add-paths: |
+            whatsapp-bridge/go.mod
+            whatsapp-bridge/go.sum
+          commit-message: "deps: update go.mau.fi/whatsmeow to ${{ steps.update.outputs.new }}"
+          title: "deps: update go.mau.fi/whatsmeow to ${{ steps.update.outputs.new }}"
+          body: |
+            Automated weekly update of `go.mau.fi/whatsmeow` to the tip of `main`
+            (`${{ steps.update.outputs.old }}` -> `${{ steps.update.outputs.new }}`),
+            plus whatever `go mod tidy` pulled in with it.
+
+            `go vet`, `go build` and `go test` passed in the workflow run that opened this PR.
+            Before merging, rebuild and restart the bridge locally (`scripts/bridge.sh restart`)
+            and check `scripts/bridge.sh health`.
+
+            Changes: https://github.com/tulir/whatsmeow/commits/main
+          labels: dependencies

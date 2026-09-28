@@ -213,6 +213,19 @@ Incoming WhatsApp messages are untrusted input read by an LLM that can also send
 - If you encounter permission issues when running uv, you may need to add it to your PATH or use the full path to the executable.
 - Make sure both the Go application and the Python server are running for the integration to work properly.
 
+### "Client outdated" (405)
+
+If the bridge log shows `Client outdated (405) connect failure` (or the bridge connects and immediately drops with a 405), WhatsApp has stopped accepting the WhatsApp Web version compiled into your build of whatsmeow. Update whatsmeow and rebuild:
+
+```bash
+cd whatsapp-bridge
+go get go.mau.fi/whatsmeow@main
+go mod tidy
+go build -o whatsapp-bridge . && go test ./...
+```
+
+Then restart the bridge. Your login session is kept. The weekly "Update whatsmeow" workflow opens a PR with this update, so usually merging that PR and pulling is enough.
+
 ### Authentication Issues
 
 - **QR Code Not Displaying**: If the QR code doesn't appear, try restarting the authentication script. If issues persist, check if your terminal supports displaying QR codes.
