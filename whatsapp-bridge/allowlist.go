@@ -113,3 +113,24 @@ func resolveSendPath(path string, allowedDirs []string) (string, error) {
 	}
 	return "", fmt.Errorf("media_path %s is outside the directories files may be sent from; copy it into %s first (or add its directory to %s)", path, hint, sendAllowedDirsEnv)
 }
+
+// sendFileOpenHook, if set, runs between the allowlist check and opening the
+// file. Tests use it to swap the file mid-check. Nil in production.
+var sendFileOpenHook func()
+
+// openSendFile checks path against allowedDirs and opens it.
+// TODO(nit): currently re-opens by path after the check (TOCTOU).
+func openSendFile(path string, allowedDirs []string) (*os.File, string, error) {
+	real, err := resolveSendPath(path, allowedDirs)
+	if err != nil {
+		return nil, "", err
+	}
+	if sendFileOpenHook != nil {
+		sendFileOpenHook()
+	}
+	f, err := os.Open(real)
+	if err != nil {
+		return nil, "", err
+	}
+	return f, real, nil
+}
