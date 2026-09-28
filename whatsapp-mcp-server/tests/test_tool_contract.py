@@ -30,6 +30,7 @@ from conftest import ALICE, _t
 
 import main
 import status
+import whatsapp
 
 SNAPSHOT = pathlib.Path(__file__).parent / "snapshots" / "tool_contract.json"
 UPDATE = os.environ.get("UPDATE_TOOL_CONTRACT") == "1"
@@ -148,6 +149,8 @@ CALLS = [
     ("get_contact_chats", {"jid": ALICE}),
     ("get_direct_chat_by_contact", {"sender_phone_number": "15550009999"}),
     ("get_chat", {"chat_jid": UNICODE_CHAT}),
+    ("get_last_interaction", {"jid": ALICE}),
+    ("get_message_context", {"message_id": "a2", "before": 1, "after": 1}),
     ("send_message", {"recipient": "15550009999", "message": "hello"}),
 ]
 
@@ -202,8 +205,11 @@ def test_tool_contract(bridge):
     _check("calls", observed["calls"])
 
 
-def test_tool_error_contract(utc, tmp_path):
-    """A tool that raises (no message database) is an is_error result with the error text."""
+def test_tool_error_contract(utc, tmp_path, caplog):
+    """A tool that raises (no message database) is an is_error result with the error text.
+
+    The exception is also logged with its traceback, for the MCP server log.
+    """
 
     async def call():
         async with client_session() as session:
@@ -214,6 +220,8 @@ def test_tool_error_contract(utc, tmp_path):
     assert result["isError"] is True
     assert result["content"][0]["text"].startswith("Error executing tool list_chats: ")
     assert "messages" in result["content"][0]["text"]
+    logged = [r for r in caplog.records if r.exc_info and isinstance(r.exc_info[1], whatsapp.WhatsAppDBError)]
+    assert len(logged) == 1 and "list_chats" in logged[0].getMessage()
     for block in result["content"]:
         block["text"] = block["text"].replace(str(tmp_path), "<tmp>")
     _check("error", result)

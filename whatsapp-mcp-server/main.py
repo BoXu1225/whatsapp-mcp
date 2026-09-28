@@ -1,6 +1,7 @@
 import functools
 import inspect
 import json
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 import pydantic_core
@@ -30,6 +31,7 @@ from whatsapp import (
 )
 
 mcp = MCPServer("whatsapp")
+logger = logging.getLogger(__name__)
 
 
 def _content(result: Any) -> List[TextContent]:
@@ -58,7 +60,8 @@ def tool(fn):
     are text content only (structured_output=False: no outputSchema and no
     structuredContent), serialized by _content. An exception becomes an error
     result "Error executing tool <name>: <error>"; mcp 2.x would drop the error
-    text for anything but a ToolError. `fn` itself is returned unchanged, so
+    text for anything but a ToolError. It is logged with its traceback first
+    (stderr, the MCP server log). `fn` itself is returned unchanged, so
     it stays callable from Python with its normal return value.
     """
 
@@ -69,6 +72,7 @@ def tool(fn):
         except ToolError:
             raise
         except Exception as e:
+            logger.exception("Tool %s failed", fn.__name__)
             raise ToolError(str(e)) from e
         return _content(result)
 
