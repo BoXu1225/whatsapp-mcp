@@ -282,3 +282,59 @@ func TestMediaLocalPathRejectsReservedChatNames(t *testing.T) {
 		})
 	}
 }
+
+// Media downloaded before a chat was merged into its LID chat stays in the old
+// phone-JID folder; downloadMedia finds it there instead of downloading again.
+func TestDownloadMediaFallsBackToMergedPNFolder(t *testing.T) {
+	store := newTestStore(t)
+	chat := "100000000000003@lid"
+	pnChat := "15550000003@s.whatsapp.net"
+	ts := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	if err := store.StoreChat(chat, "Carol Example", ts); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StoreMessageWithAlt("m1", chat, chat, pnChat, "", ts, false, "image", "image_1.jpg", "", nil, nil, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	oldDir := filepath.Join(store.dir, pnChat)
+	if err := os.MkdirAll(oldDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldDir, "image_1.jpg"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, _, filename, got, err := downloadMedia(nil, store, "m1", chat)
+	if !ok || err != nil {
+		t.Fatalf("downloadMedia: ok=%v err=%v", ok, err)
+	}
+	realStore, _ := filepath.EvalSymlinks(store.dir)
+	if filename != "image_1.jpg" || got != filepath.Join(realStore, pnChat, "image_1.jpg") {
+		t.Errorf("got %q %q, want the file in the old phone-JID folder", filename, got)
+	}
+}
+
+// The fallback folder comes from stored data, so it gets the same checks: a
+// sender_alt that isn't a plain chat dir is never used.
+func TestDownloadMediaFallbackRejectsUnsafeFolder(t *testing.T) {
+	store := newTestStore(t)
+	chat := "100000000000003@lid"
+	ts := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	if err := store.StoreChat(chat, "x", ts); err != nil {
+		t.Fatal(err)
+	}
+	evil := "../outside@s.whatsapp.net"
+	if err := store.StoreMessageWithAlt("m1", chat, chat, evil, "", ts, false, "image", "image_1.jpg", "", nil, nil, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(store.dir, "..", "outside@s.whatsapp.net")
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "image_1.jpg"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _, _, got, err := downloadMedia(nil, store, "m1", chat); ok || err == nil {
+		t.Fatalf("downloadMedia used %q outside the store", got)
+	}
+}

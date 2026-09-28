@@ -268,6 +268,18 @@ func TestLiveMessageMergesExistingPNChat(t *testing.T) {
 	if got := chatRows(t, store); len(got) != 1 || got[carolLID+"@lid"] != 3 {
 		t.Fatalf("chats = %v, want one chat %s@lid with 3 messages", got, carolLID)
 	}
+	// The moved rows get migration 4's canonical senders: the other person
+	// in the chat's (LID) form, our own messages as our LID, alts filled.
+	want := map[string]msgIdentity{
+		"H1": {carolLID + "@lid", carolLID + "@lid", carolPN + "@s.whatsapp.net"},
+		"H2": {carolLID + "@lid", ownLID + "@lid", ownPN + "@s.whatsapp.net"},
+	}
+	got := messageIdentities(t, store.db)
+	for id, w := range want {
+		if got[id] != w {
+			t.Errorf("%s = %+v, want %+v", id, got[id], w)
+		}
+	}
 }
 
 // The first live merge of a run backs the database up first (like the startup
