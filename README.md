@@ -101,7 +101,9 @@ This application consists of two main components:
 
 ### Data Storage
 
-- Message history is in `whatsapp-bridge/store/messages.db` (tables `chats` and `messages`); the WhatsApp session, contacts and LID map are in whatsmeow's `whatsapp-bridge/store/whatsapp.db`.
+- Message history is in `whatsapp-bridge/store/messages.db` (tables `chats`, `messages` and `reactions`); the WhatsApp session, contacts and LID map are in whatsmeow's `whatsapp-bridge/store/whatsapp.db`.
+- Live messages and history sync go through the same code, so both store the same things: text; media with its caption; stickers (media type `sticker`); locations and live locations as `[location lat,lng name]` / `[live location lat,lng] caption`; shared contacts as `[contact Name]` / `[contacts A, B]`; polls as `[poll] question: option 1 / option 2` (votes are not stored); the ID of the message a reply quotes; and reactions (in `reactions`; an empty reaction removes it). Wrapped messages (disappearing, view-once, document with caption) are unwrapped. A history batch is written in one transaction, and a chat's `last_message_time` never moves backwards.
+- Edits replace the stored text and set `edited_at` (only the author's edits apply). A message deleted for everyone is marked `is_deleted` with `deleted_at` and keeps its text; start the bridge with `-purge-deleted` to clear the text of messages deleted from then on.
 - Downloaded media goes to `whatsapp-bridge/store/<chat>/`; files to send go in `whatsapp-bridge/store/outbox/`.
 - `store/` is private data and is git-ignored.
 
@@ -113,6 +115,7 @@ This application consists of two main components:
 2. `messages.sender_alt` holds the sender's other address (phone JID for a LID sender, and vice versa) when known.
 3. A 1:1 chat is keyed by the person's LID JID when the LID is known, else by their phone JID. Phone-number and LID copies of the same chat are merged (also later, when a message reveals the mapping; the first such merge in a run backs up `messages.db` first). This step and the next run once the device store has loaded, and only when logged in.
 4. Senders are full JIDs without device part (`user@server`). In a 1:1 chat the other person uses the chat's JID. Your own messages use your LID in LID chats and your phone JID elsewhere, including groups. Bare numbers whose server can't be determined are left as they were.
+5. Message capture: `messages.reply_to` (ID of the quoted message), `edited_at`, `is_deleted` and `deleted_at`, and a `reactions` table (one row per message and sender: `message_id`, `chat_jid`, `sender`, `emoji`, `timestamp`). It needs no login; if it has to wait behind steps 3 and 4 (not logged in yet), its columns are added at start anyway so new messages can be stored.
 
 To upgrade, rebuild and restart the bridge. Restart the MCP server too. Until the bridge has migrated the database, time filters may be off by the UTC offset. Downloaded media of a re-keyed chat stays in the old `store/<phone JID>/` folder, where `download_media` with the new chat JID still finds it. Downgrading is not supported; to go back, restore the `.bak` file as `store/messages.db`.
 
@@ -131,7 +134,7 @@ Claude can access the following tools to interact with WhatsApp:
 - **get_direct_chat_by_contact**: Find the direct chat with a contact by phone number, LID or JID (exact match; `+`, spaces and dashes are ignored)
 - **get_contact_chats**: List all chats involving a specific contact, each once
 - **get_last_interaction**: Get the most recent message with a contact
-- **get_message_context**: Retrieve context around a specific message (`before` and `after` oldest first)
+- **get_message_context**: Retrieve context around a specific message (`before` and `after` oldest first). Each message has `reply_to`, `edited`, `deleted` and `reactions` (`{emoji: count}`)
 - **send_message**: Send a WhatsApp message to a person or group
 - **send_file**: Send a file (image, video, raw audio, document) to a person or group
 - **send_audio_message**: Send an audio file as a WhatsApp voice message (requires the file to be an .ogg opus file or ffmpeg must be installed)
@@ -153,8 +156,10 @@ If you have prompts or scripts built on the earlier tool output, note:
   - The line format is now `[time] Chat: <name> (<jid>) | ID: <id> | From: <name or Me>: <text>`, oldest first, with no repeated messages. With context, matches are marked `>>`.
   - `limit`/`page` select the newest matches, which are then printed oldest first.
   - Media shows as `[type: filename] caption`.
+  - Replies start with `[↪ reply to <message ID>]`, messages deleted for everyone with `[deleted]`, edited ones end with `(edited)`, and reactions follow as `[reactions: 👍×2 ❤️×1]`.
   - `%` and `_` in `query` match literally (the same holds for `list_chats`).
-- `get_message_context` returns `before` oldest first.
+- `get_message_context` returns `before` oldest first. Messages carry new fields `reply_to`, `edited`, `deleted` and `reactions`.
+- `list_awaiting_reply` ignores messages deleted for everyone when finding a chat's newest message.
 - Times are shown in local time with their UTC offset (`2024-03-31 02:30:00+01:00`). `after`, `before` and `since` accept `Z` or an offset; a time without one is local time.
 - A 1:1 chat that used to appear twice (phone JID and `@lid` JID) is one chat, keyed by the `@lid` JID.
 - Chat objects:

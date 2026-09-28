@@ -18,6 +18,17 @@ which this fork started from.
   exits 1, naming the backup.
 - `messages.sender_alt`: the sender's other address (phone JID for a LID
   sender and vice versa) when known (#8).
+- More message types are stored: media captions, stickers (`sticker`),
+  locations and live locations, shared contacts, polls (question and
+  options) and the ID of the message a reply quotes (`messages.reply_to`).
+  Reactions go to a new `reactions` table, one per message and sender (#15).
+- Edits update the stored text and set `messages.edited_at`; messages deleted
+  for everyone are marked `is_deleted` with `deleted_at` and keep their text
+  unless the bridge runs with the new `-purge-deleted` flag (#16).
+- `list_messages` and `get_message_context` show replies
+  (`[↪ reply to <id>]`), `[deleted]`, `(edited)` and reactions
+  (`[reactions: 👍×2]`); `get_message_context` messages gain `reply_to`,
+  `edited`, `deleted` and `reactions` fields (#15, #16).
 
 ### Changed
 
@@ -28,6 +39,13 @@ which this fork started from.
   by their phone JID. Phone-number and LID copies of a chat are merged, on
   upgrade and when a message reveals the mapping. The first such live merge
   in a run backs up `messages.db` first (#9).
+- History sync goes through `ParseWebMessage` and the same code as live
+  messages, so disappearing, view-once and captioned-document messages are no
+  longer dropped. A conversation is no longer skipped when its newest message
+  is empty, each batch is written in one transaction, and a chat's
+  `last_message_time` (from the conversation timestamp) never moves backwards
+  when an older batch arrives (#17).
+- `list_awaiting_reply` ignores messages deleted for everyone (#16).
 - Senders are stored as full JIDs without device part. In a 1:1 chat the
   other person uses the chat's JID. Your own messages use your LID in LID
   chats and your phone JID elsewhere. The MCP server reads old bare-number
@@ -44,8 +62,13 @@ which this fork started from.
    dropped, own messages follow the rule above and `sender_alt` is filled.
    Bare numbers whose server can't be determined are left and counted.
 
+5. `message_capture`: adds `messages.reply_to`, `edited_at`, `is_deleted`
+   (default 0) and `deleted_at`, and the `reactions` table. Only adds; no
+   existing row changes.
+
 Migrations 3 and 4 need the device store and run only when logged in; they
-wait for a start after login otherwise.
+wait for a start after login otherwise. Migration 5 then waits behind them,
+but its columns are added at start anyway so messages can be stored.
 
 ### Upgrade notes
 
@@ -61,6 +84,12 @@ wait for a start after login otherwise.
   senders for the moved messages. Each run that merges a chat this way writes
   one more `store/messages.db.bak-<version>-<timestamp>` before its first
   merge, so old backups can pile up; delete the ones you don't need.
+- Migration 5: a database already at version 4 is backed up
+  (`messages.db.bak-4-<timestamp>`) and migrated on the next bridge start.
+  Restart the MCP server too so it shows the new markers; an MCP server on an
+  unmigrated database still works, without them. Messages stored before the
+  upgrade have no captions, reply IDs, reactions or edit/delete marks; a
+  history re-sync fills in what WhatsApp sends again.
 - Downgrading is not supported: an older bridge doesn't know the new schema
   or the UTC timestamps. To go back, stop the bridge and restore the `.bak`
   file from before the upgrade as `store/messages.db`.
