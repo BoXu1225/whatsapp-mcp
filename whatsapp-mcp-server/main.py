@@ -89,6 +89,9 @@ def list_chats(
     sort_by: str = "last_active"
 ) -> List[Dict[str, Any]]:
     """Get WhatsApp chats matching specified criteria.
+
+    Each chat's last message is its newest stored message (last_message, last_message_id,
+    last_sender_name, last_is_from_me). Database errors are reported as tool errors.
     
     Args:
         query: Optional search term to filter chats by name or JID
