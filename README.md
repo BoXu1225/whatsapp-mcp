@@ -51,9 +51,9 @@ Tested on macOS. Linux should work the same way; Windows is untested (see [Windo
 
    | Command | What it does |
    | --- | --- |
-   | `start` | Build if the Go sources changed, then start in the background (no-op if running). Logs to `whatsapp-bridge/bridge.log`, rotated to `bridge.log.1` over 10 MB. |
+   | `start` | Build if the Go sources changed, start in the background (no-op if running) and wait up to 70 s until it is connected to WhatsApp. Exits 1 with the last log lines if the bridge exits or doesn't connect, or with a hint to use `fg` if it needs a QR scan. Logs to `whatsapp-bridge/bridge.log`, rotated to `bridge.log.1` over 10 MB. |
    | `stop` / `restart` | Stop / stop then start. |
-   | `status` | Whether the process is running. |
+   | `status` | Whether the process is running; if not, the last log lines (exit status 1). |
    | `health` | Ask the running bridge for `/api/health`: connected, logged in, last event, start time, version. Exits 0 only if connected and logged in. |
    | `logs` | Follow the log. |
    | `fg` | Run in the foreground, e.g. to scan a new QR code. |
@@ -105,7 +105,7 @@ This application consists of two main components:
 - Live messages and history sync go through the same code, so both store the same things: text; media with its caption; stickers (media type `sticker`); locations and live locations as `[location lat,lng name]` / `[live location lat,lng] caption`; shared contacts as `[contact Name]` / `[contacts A, B]`; polls as `[poll] question: option 1 / option 2` (votes are not stored); the ID of the message a reply quotes; and reactions (in `reactions`; an empty reaction removes it). Wrapped messages (disappearing, view-once, document with caption) are unwrapped. A history batch is written in one transaction, and a chat's `last_message_time` never moves backwards.
 - Edits replace the stored text and set `edited_at` (only the author's edits apply). A message deleted for everyone is marked `is_deleted` with `deleted_at` and keeps its text (shown as `[deleted] <text>`); start the bridge with `-purge-deleted` to clear the text of messages their author deletes from then on. In a group, a delete by someone other than the author (an admin; the bridge can't check) is recorded in `deleted_by` and never clears the text.
 - `messages.db` is opened in WAL mode with a 5 s busy timeout, so the MCP server can read while the bridge writes. A message the bridge fails to store is not acknowledged to WhatsApp; whatsmeow keeps the decrypted copy and hands it over again when the server redelivers it (on a later connection).
-- Downloaded media goes to `whatsapp-bridge/store/<chat>/<message ID>.<ext>`; files to send go in `whatsapp-bridge/store/outbox/`.
+- Downloaded media goes to `whatsapp-bridge/store/<chat>/<message ID>.<ext>` (stickers `.webp`; an ID with characters other than letters, digits, `-` and `_` gets them replaced and a short hash appended); files to send go in `whatsapp-bridge/store/outbox/`.
 - `store/` is private data and is git-ignored.
 
 ### Schema migrations
