@@ -82,3 +82,14 @@ def test_tool_surfaces_error():
 
     with pytest.raises(whatsapp.WhatsAppDBError):
         main.list_chats()
+
+
+def test_list_chats_query_treats_like_wildcards_literally(messages_db):
+    messages_db.add_chat("120363000000000011@g.us", "100% Club", T)
+    messages_db.add_chat("120363000000000012@g.us", "Team 2024", T)
+    messages_db.add_chat("120363000000000013@g.us", "a_b", T)
+    messages_db.add_chat("120363000000000014@g.us", "axb", T)
+    messages_db.add_chat("120363000000000015@g.us", "back\\slash", T)
+    assert [c.name for c in whatsapp.list_chats(query="0%")] == ["100% Club"]
+    assert [c.name for c in whatsapp.list_chats(query="a_b")] == ["a_b"]
+    assert [c.name for c in whatsapp.list_chats(query="k\\s")] == ["back\\slash"]

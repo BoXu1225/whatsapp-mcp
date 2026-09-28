@@ -90,3 +90,8 @@ def test_message_context_includes_same_second_neighbours(messages_db):
     ctx = whatsapp.get_message_context("s2", before=5, after=5)
     assert [m.id for m in ctx.before] == ["s1"]
     assert [m.id for m in ctx.after] == ["s3"]
+
+
+def test_query_treats_like_wildcards_literally(seeded_db):
+    seeded_db.add_message("p1", ALICE, "15550000001", "50% off", at(0))
+    assert ids(whatsapp.list_messages(query="0%", include_context=False)) == ["p1"]
