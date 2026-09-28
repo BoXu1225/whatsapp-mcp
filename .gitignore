@@ -1,5 +1,24 @@
+# Private data: WhatsApp session, message DB, downloaded media
+whatsapp-bridge/store/
+
+# SQLite databases and side files (-wal, -shm, -journal)
 *.db
-claude_desktop_config.json
-whatsapp.log
+*.db-*
+
+# Logs
+*.log
+*.log.*
+
+# Build output
 whatsapp-bridge/whatsapp-bridge
-bridge.log
+whatsapp-bridge/whatsapp-client
+
+# Local config
+claude_desktop_config.json
+
+# OS / tooling
+.DS_Store
+__pycache__/
+.venv/
+.pytest_cache/
+.ruff_cache/
