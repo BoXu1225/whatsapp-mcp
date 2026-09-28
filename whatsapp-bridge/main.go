@@ -95,6 +95,7 @@ func main() {
 		os.Exit(2)
 	}
 	debugLogging = flags.debug
+	health := newBridgeHealth(time.Now()) // for /api/health, see health.go
 
 	// Set up logger
 	logger := waLog.Stdout("Client", "INFO", true)
@@ -173,6 +174,9 @@ func main() {
 		logger.Warnf("Debug logging on: message content, names and file paths will be logged")
 	}
 
+	// Every event counts as a sign of life for /api/health.
+	client.AddEventHandler(health.eventHandler)
+
 	// Setup event handling for messages and history sync
 	client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
@@ -250,6 +254,7 @@ func main() {
 	api := newAPIServer(client, messageStore)
 	api.token = token
 	api.allowedDirs = allowedDirs
+	api.health = health
 	serveREST(api, restListener)
 
 	// Create a channel to keep the main goroutine alive
