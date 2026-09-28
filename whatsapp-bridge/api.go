@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 )
 
 // SendMessageResponse represents the response for the send message API
@@ -65,6 +67,8 @@ type apiServer struct {
 	isLoggedIn  func() bool
 
 	media *mediaService // downloads and media retries
+
+	sendPeer func(ctx context.Context, msg *waE2E.Message) (string, error) // TODO(#20) stub
 }
 
 func newAPIServer(client *whatsmeow.Client, messageStore *MessageStore) *apiServer {
