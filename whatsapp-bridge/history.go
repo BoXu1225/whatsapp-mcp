@@ -127,14 +127,12 @@ func storeHistorySyncWith(messageStore *MessageStore, id Identity, parse webPars
 					logger.Warnf("Failed to store history message %s: %v", evt.Info.ID, err)
 					continue
 				}
-				if !res.stored {
+				// Reactions, edits and revokes don't count as chat activity.
+				if !res.stored || res.kind != "message" {
 					continue
 				}
 				if evt.Info.Timestamp.After(last) {
 					last = evt.Info.Timestamp
-				}
-				if res.kind != "message" {
-					continue
 				}
 				syncedCount++
 				// Per-message logging (with content) only with -debug

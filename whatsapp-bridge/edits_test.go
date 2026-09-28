@@ -248,3 +248,37 @@ func TestRevokeFromHistory(t *testing.T) {
 		t.Errorf("history revoke not applied: %+v", s)
 	}
 }
+
+// With -purge-deleted, a revoke also clears the stored text, live and in a
+// history batch (which goes through a transaction view of the store).
+func TestPurgeDeletedClearsContent(t *testing.T) {
+	store := newTestStore(t)
+	store.purgeDeleted = true
+	storeLive(t, store, danLive("M1", t0, text("secret")))
+	storeLive(t, store, danLive("D1", t0.Add(time.Minute), revokeMsg("M1")))
+	if s := stateOf(t, store, "M1"); !s.deleted || s.content != "" {
+		t.Errorf("after purge revoke: %+v, want deleted with no content", s)
+	}
+	storeHistorySync(store, testIdentity(), histConv(danChat, 0,
+		histMsg(danChat, "HD1", false, 1704200100, revokeMsg("HM1")),
+		histMsg(danChat, "HM1", false, 1704200000, text("history secret")),
+	), fixedName("Dan Example"), quietLogger())
+	if s := stateOf(t, store, "HM1"); !s.deleted || s.content != "" {
+		t.Errorf("after history purge revoke: %+v", s)
+	}
+	// Re-delivery doesn't bring the text back.
+	storeLive(t, store, danLive("M1", t0, text("secret")))
+	if s := stateOf(t, store, "M1"); s.content != "" {
+		t.Errorf("re-delivery restored purged content: %+v", s)
+	}
+}
+
+func TestPurgeDeletedFlag(t *testing.T) {
+	f, err := parseFlags([]string{"-purge-deleted"})
+	if err != nil || !f.purgeDeleted {
+		t.Errorf("parseFlags(-purge-deleted) = %+v, %v", f, err)
+	}
+	if f, _ := parseFlags(nil); f.purgeDeleted {
+		t.Error("purge-deleted should be off by default")
+	}
+}
