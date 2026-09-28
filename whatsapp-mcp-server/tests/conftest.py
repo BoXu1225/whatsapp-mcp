@@ -49,8 +49,24 @@ LEGACY_BRIDGE_SCHEMA = """
     );
 """
 
-BRIDGE_SCHEMA = LEGACY_BRIDGE_SCHEMA + """
+PRE_CAPTURE_BRIDGE_SCHEMA = LEGACY_BRIDGE_SCHEMA + """
     ALTER TABLE messages ADD COLUMN sender_alt TEXT;
+"""
+
+# Migration 5 (message capture, #15/#16): reply context, edits, deletes, reactions.
+BRIDGE_SCHEMA = PRE_CAPTURE_BRIDGE_SCHEMA + """
+    ALTER TABLE messages ADD COLUMN reply_to TEXT;
+    ALTER TABLE messages ADD COLUMN edited_at TIMESTAMP;
+    ALTER TABLE messages ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE messages ADD COLUMN deleted_at TIMESTAMP;
+    CREATE TABLE reactions (
+        message_id TEXT NOT NULL,
+        chat_jid TEXT NOT NULL,
+        sender TEXT NOT NULL,
+        emoji TEXT NOT NULL,
+        timestamp TIMESTAMP,
+        PRIMARY KEY (message_id, chat_jid, sender)
+    );
 """
 
 # From go.mau.fi/whatsmeow store/sqlstore/upgrades/00-latest-schema.sql. The
@@ -90,12 +106,15 @@ def bridge_timestamp(dt: datetime) -> str:
 
 
 class FakeMessagesDB:
-    def __init__(self, path, legacy=False):
-        """legacy=True: the schema before migrations (no sender_alt column)."""
+    def __init__(self, path, legacy=False, pre_capture=False):
+        """legacy=True: the schema before migrations (no sender_alt column).
+        pre_capture=True: the schema before migration 5 (no reply_to, edited_at,
+        is_deleted, deleted_at, reactions)."""
         self.path = str(path)
         self.legacy = legacy
+        schema = LEGACY_BRIDGE_SCHEMA if legacy else PRE_CAPTURE_BRIDGE_SCHEMA if pre_capture else BRIDGE_SCHEMA
         with sqlite3.connect(self.path) as conn:
-            conn.executescript(LEGACY_BRIDGE_SCHEMA if legacy else BRIDGE_SCHEMA)
+            conn.executescript(schema)
 
     def add_chat(self, jid, name, last_message_time):
         with sqlite3.connect(self.path) as conn:
@@ -105,17 +124,35 @@ class FakeMessagesDB:
             )
 
     def add_message(
-        self, id, chat_jid, sender, content, timestamp, is_from_me=False, media_type="", filename="", sender_alt=None
+        self, id, chat_jid, sender, content, timestamp, is_from_me=False, media_type="", filename="", sender_alt=None,
+        reply_to=None, edited_at=None, deleted_at=None,
     ):
         columns = ["id", "chat_jid", "sender", "content", "timestamp", "is_from_me", "media_type", "filename"]
         values = [id, chat_jid, sender, content, bridge_timestamp(timestamp), is_from_me, media_type, filename]
         if sender_alt is not None:
             columns.append("sender_alt")
             values.append(sender_alt)
+        if reply_to is not None:
+            columns.append("reply_to")
+            values.append(reply_to)
+        if edited_at is not None:
+            columns.append("edited_at")
+            values.append(bridge_timestamp(edited_at))
+        if deleted_at is not None:
+            columns += ["is_deleted", "deleted_at"]
+            values += [1, bridge_timestamp(deleted_at)]
         with sqlite3.connect(self.path) as conn:
             conn.execute(
                 f"INSERT OR REPLACE INTO messages ({', '.join(columns)}) VALUES ({', '.join('?' * len(values))})",
                 values,
+            )
+
+
+    def add_reaction(self, message_id, chat_jid, sender, emoji, timestamp):
+        with sqlite3.connect(self.path) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO reactions (message_id, chat_jid, sender, emoji, timestamp) VALUES (?, ?, ?, ?, ?)",
+                (message_id, chat_jid, sender, emoji, bridge_timestamp(timestamp)),
             )
 
 
