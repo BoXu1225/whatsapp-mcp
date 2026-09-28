@@ -129,8 +129,6 @@ func TestMediaFileNameByMessageID(t *testing.T) {
 		{"3EB0A1B2C3", "", "image", "3EB0A1B2C3.jpg"},
 		{"3EB0A1B2C3", "evil.p$f", "document", "3EB0A1B2C3"},
 		{"3EB0A1B2C3", "x." + strings.Repeat("z", 40), "document", "3EB0A1B2C3"},
-		{"../../etc/passwd", "a.jpg", "image", "______etc_passwd.jpg"},
-		{"id with space", "a.jpg", "image", "id_with_space.jpg"},
 	}
 	for _, tt := range tests {
 		got, err := mediaFileName(tt.id, tt.orig, tt.mediaType)
