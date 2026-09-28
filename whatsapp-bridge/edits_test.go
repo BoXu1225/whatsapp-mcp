@@ -206,22 +206,74 @@ func TestRevokeFromAnotherSenderIgnoredInDirectChat(t *testing.T) {
 	}
 }
 
-// In a group an admin can delete someone else's message.
-func TestAdminRevokeInGroup(t *testing.T) {
-	store := newTestStore(t)
-	groupMsg := func(id string, sender types.JID, m *waE2E.Message, ts time.Time) *events.Message {
-		return &events.Message{
-			Info: types.MessageInfo{
-				MessageSource: types.MessageSource{Chat: testGroup, Sender: sender, IsGroup: true},
-				ID:            id, Timestamp: ts,
-			},
-			Message: m,
+func groupMsg(id string, sender types.JID, m *waE2E.Message, ts time.Time) *events.Message {
+	return &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: testGroup, Sender: sender, IsGroup: true},
+			ID:            id, Timestamp: ts,
+		},
+		Message: m,
+	}
+}
+
+func deletedBy(t *testing.T, store *MessageStore, id string) string {
+	t.Helper()
+	var by sql.NullString
+	if err := store.db.QueryRow("SELECT deleted_by FROM messages WHERE id = ?", id).Scan(&by); err != nil {
+		t.Fatalf("deleted_by of %s: %v", id, err)
+	}
+	return by.String
+}
+
+// In a group someone else (an admin, or anyone claiming to be) can delete a
+// message: it is marked deleted, the revoker is recorded in deleted_by, and
+// the text is never purged, even with -purge-deleted.
+func TestNonAuthorRevokeInGroup(t *testing.T) {
+	for _, purge := range []bool{false, true} {
+		store := newTestStore(t)
+		store.purgeDeleted = purge
+		storeLive(t, store, groupMsg("G1", carolLIDJID, text("spam"), t0))
+		storeLive(t, store, groupMsg("GD1", danJID, revokeMsg("G1"), t0.Add(time.Minute)))
+		if s := stateOf(t, store, "G1"); !s.deleted || s.content != "spam" {
+			t.Errorf("purge=%v: non-author revoke: %+v, want deleted with text kept", purge, s)
+		}
+		if by := deletedBy(t, store, "G1"); by != danChat {
+			t.Errorf("purge=%v: deleted_by = %q, want the revoker %s", purge, by, danChat)
 		}
 	}
-	storeLive(t, store, groupMsg("G1", carolLIDJID, text("spam"), t0))
-	storeLive(t, store, groupMsg("GD1", danJID, revokeMsg("G1"), t0.Add(time.Minute)))
-	if s := stateOf(t, store, "G1"); !s.deleted {
-		t.Errorf("admin revoke not applied: %+v", s)
+}
+
+// The author's own revoke in a group: deleted, purged with -purge-deleted,
+// no deleted_by.
+func TestAuthorRevokeInGroup(t *testing.T) {
+	store := newTestStore(t)
+	store.purgeDeleted = true
+	storeLive(t, store, groupMsg("G1", carolLIDJID, text("oops"), t0))
+	storeLive(t, store, groupMsg("GD1", carolLIDJID, revokeMsg("G1"), t0.Add(time.Minute)))
+	if s := stateOf(t, store, "G1"); !s.deleted || s.content != "" {
+		t.Errorf("author revoke with purge: %+v, want deleted and purged", s)
+	}
+	if by := deletedBy(t, store, "G1"); by != "" {
+		t.Errorf("deleted_by = %q, want empty for the author's own revoke", by)
+	}
+}
+
+// A message ID delivered again with another sender keeps the original
+// sender, so it can't be used to pass the edit/revoke author checks.
+func TestRedeliveryKeepsOriginalSender(t *testing.T) {
+	store := newTestStore(t)
+	storeLive(t, store, groupMsg("G1", carolLIDJID, text("carol's"), t0))
+	storeLive(t, store, groupMsg("G1", danJID, text("carol's"), t0))
+	var sender string
+	store.db.QueryRow("SELECT sender FROM messages WHERE id = 'G1'").Scan(&sender)
+	if sender != carolLID+"@lid" {
+		t.Fatalf("sender after re-delivery = %q, want Carol's", sender)
+	}
+	store.purgeDeleted = true
+	storeLive(t, store, groupMsg("GE1", danJID, &waE2E.Message{ProtocolMessage: editProto("G1", text("dan's now"), t0.Add(time.Minute))}, t0.Add(time.Minute)))
+	storeLive(t, store, groupMsg("GD1", danJID, revokeMsg("G1"), t0.Add(2*time.Minute)))
+	if s := stateOf(t, store, "G1"); s.content != "carol's" || s.edited {
+		t.Errorf("after edit and revoke by Dan: %+v, want Carol's text kept, not edited", s)
 	}
 }
 
