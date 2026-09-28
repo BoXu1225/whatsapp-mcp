@@ -94,11 +94,11 @@ func (store *MessageStore) migrate(id *Identity) (migrationReport, error) {
 		return rep, nil
 	}
 
+	hasData, err := store.hasData()
+	if err != nil {
+		return rep, fmt.Errorf("failed to inspect database before migrating: %v", err)
+	}
 	if store.backupPath == "" {
-		hasData, err := store.hasData()
-		if err != nil {
-			return rep, fmt.Errorf("failed to inspect database before migrating: %v", err)
-		}
 		if hasData {
 			path, err := store.backup(current)
 			if err != nil {
@@ -118,7 +118,9 @@ func (store *MessageStore) migrate(id *Identity) (migrationReport, error) {
 			return rep, fmt.Errorf("migration %d (%s) failed and was rolled back: %v%s", m.version, m.name, err, hint)
 		}
 	}
-	fmt.Printf("messages.db migrated to schema version %d: %s\n", pending[len(pending)-1].version, rep)
+	if hasData {
+		fmt.Printf("messages.db migrated to schema version %d: %s\n", pending[len(pending)-1].version, rep)
+	}
 	return rep, nil
 }
 
