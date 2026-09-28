@@ -39,10 +39,12 @@ Here's an example of what you can do when it's connected to Claude.
 
    ```bash
    cd whatsapp-bridge
-   go run main.go
+   go run .
    ```
 
    The first time you run it, you will be prompted to scan a QR code. Scan the QR code with your WhatsApp mobile app to authenticate.
+
+   On start the bridge creates `store/bridge_token` (the API token, see [Security](#security)) and `store/outbox/` (the only place files can be sent from by default). Add `-debug` (`go run . -debug`) to log message content; by default it is kept out of the logs.
 
    After approximately 20 days, you will might need to re-authenticate.
 
@@ -99,7 +101,7 @@ If you're running this project on Windows, be aware that `go-sqlite3` requires *
    ```bash
    cd whatsapp-bridge
    go env -w CGO_ENABLED=1
-   go run main.go
+   go run .
    ```
 
 Without this setup, you'll likely run into errors like:
@@ -149,6 +151,8 @@ The MCP server supports both sending and receiving various media types:
 
 You can send various media types to your WhatsApp contacts:
 
+Files can only be sent from `whatsapp-bridge/store/outbox/` (or directories listed in `WHATSAPP_SEND_ALLOWED_DIRS`, see [Security](#security)). Copy a file there before asking Claude to send it.
+
 - **Images, Videos, Documents**: Use the `send_file` tool to share any supported media type.
 - **Voice Messages**: Use the `send_audio_message` tool to send audio files as playable WhatsApp voice messages.
   - For optimal compatibility, audio files should be in `.ogg` Opus format.
@@ -158,6 +162,16 @@ You can send various media types to your WhatsApp contacts:
 #### Media Downloading
 
 By default, just the metadata of the media is stored in the local database. The message will indicate that media was sent. To access this media you need to use the download_media tool which takes the `message_id` and `chat_jid` (which are shown when printing messages containing the meda), this downloads the media and then returns the file path which can be then opened or passed to another tool.
+
+## Security
+
+Incoming WhatsApp messages are untrusted input read by an LLM that can also send messages, so the bridge limits what a confused or prompt-injected client can do:
+
+- **API token.** On start the bridge ensures `whatsapp-bridge/store/bridge_token` exists (random, mode 0600). Every `/api/*` request must send it in an `X-Bridge-Token` header, POST bodies must be `Content-Type: application/json`, and the `Host` header must be `127.0.0.1:8080` or `localhost:8080`. Other requests get 401, 415 or 403. The MCP server reads the token from the directory holding `messages.db` on every call, so nothing needs configuring; if you call the API yourself, send the header.
+- **Send allowlist.** `send_file` and `send_audio_message` only send files that, after resolving `..` and symlinks, are inside `whatsapp-bridge/store/outbox/`. To allow more directories set `WHATSAPP_SEND_ALLOWED_DIRS` (separated by `:`, or `;` on Windows) in the environment of both the bridge and the MCP server (for Claude Desktop, via an `"env"` entry in the server config). The bridge enforces this; the MCP server checks it too for a clearer error. Audio converted by ffmpeg is written to the outbox and removed after sending.
+- **Downloads.** Sender-provided document filenames are reduced to a base name, and downloads always stay inside `whatsapp-bridge/store/<chat>/` (dirs 0700, files 0600).
+- **Logs and files.** Message text, names and file paths are only logged with `-debug`. On start the bridge makes `store/` 0700 and the databases (`whatsapp.db` holds the session keys), `bridge_token` and other files in it 0600. If you start the bridge from a script, `umask 077` keeps new files private too.
+- **ffmpeg** runs with `-protocol_whitelist file` and an input format taken from the file's contents, so playlist-style inputs are rejected.
 
 ## Technical Details
 
