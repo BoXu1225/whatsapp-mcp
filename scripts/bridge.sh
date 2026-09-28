@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Manage the WhatsApp bridge that the WhatsApp MCP server talks to (127.0.0.1:8080).
 #
-#   bridge.sh start    start in the background (no-op if already running)
+#   bridge.sh start    start in the background and wait until it is connected to
+#                      WhatsApp (up to 70 s); no-op if already running
 #   bridge.sh stop     stop it
 #   bridge.sh restart  stop, then start
-#   bridge.sh status   show whether the process is running
+#   bridge.sh status   show whether the process is running (else the last log lines)
 #   bridge.sh health   ask the running bridge for /api/health (connected, last event, ...)
 #   bridge.sh logs     follow the log
 #   bridge.sh fg       run in the foreground (use this if you need to scan a QR code again)
@@ -55,6 +56,15 @@ rotate_log() {
   fi
 }
 
+# Seconds start waits for the bridge to connect to WhatsApp. The bridge
+# itself gives up (exit 1) after 60 s without a connection.
+START_TIMEOUT=70
+
+# new_log_lines prints what the log gained since it was $1 bytes long.
+new_log_lines() {
+  [[ -f "$LOG" ]] && tail -c +"$(( $1 + 1 ))" "$LOG"
+}
+
 start() {
   if [[ -n "$(pid)" ]]; then
     echo "Bridge already running (pid $(pid))."
@@ -62,24 +72,44 @@ start() {
   fi
   build_if_needed
   rotate_log
+  local log_start=0
+  [[ -f "$LOG" ]] && log_start=$(wc -c <"$LOG" | tr -d ' ')
   # Run from the bridge dir so it finds its login session in store/
   (cd "$BRIDGE_DIR" && nohup "$BIN" >>"$LOG" 2>&1 &)
-  printf "Starting bridge"
-  for _ in {1..20}; do
-    if lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-      echo " ... up (pid $(pid)). Log: $LOG"
-      return 0
-    fi
+  printf "Starting bridge (waiting up to %ss for WhatsApp)" "$START_TIMEOUT"
+  local deadline=$(( SECONDS + START_TIMEOUT ))
+  while (( SECONDS < deadline )); do
+    sleep 1
     if [[ -z "$(pid)" ]]; then
       echo " ... exited. Last log lines:"
-      tail -n 15 "$LOG"
+      new_log_lines "$log_start" | tail -n 15
+      return 1
+    fi
+    if health >/dev/null 2>&1; then
+      echo " ... connected (pid $(pid)). Log: $LOG"
+      return 0
+    fi
+    if new_log_lines "$log_start" | grep -q "Scan this QR code"; then
+      echo " ... it needs pairing. Run: $0 stop && $0 fg"
       return 1
     fi
     printf "."
-    sleep 1
   done
-  echo " ... not listening on :$PORT yet. If the log shows a QR code, run: $0 stop && $0 fg"
-  tail -n 15 "$LOG"
+  echo " ... not connected after ${START_TIMEOUT}s (pid $(pid)). Last log lines:"
+  new_log_lines "$log_start" | tail -n 15
+  return 1
+}
+
+status() {
+  if [[ -n "$(pid)" ]]; then
+    echo "Running (pid $(pid))."
+    return 0
+  fi
+  echo "Not running."
+  if [[ -s "$LOG" ]]; then
+    echo "Last log lines ($LOG):"
+    tail -n 10 "$LOG"
+  fi
   return 1
 }
 
@@ -128,7 +158,7 @@ case "${1:-start}" in
   start)   start ;;
   stop)    stop ;;
   restart) stop; start ;;
-  status)  if [[ -n "$(pid)" ]]; then echo "Running (pid $(pid))."; else echo "Not running."; fi ;;
+  status)  status ;;
   health)  health ;;
   logs)    tail -f "$LOG" ;;
   fg)      stop >/dev/null; build_if_needed; cd "$BRIDGE_DIR" && exec "$BIN" ;;
