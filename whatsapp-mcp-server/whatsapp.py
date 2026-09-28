@@ -430,17 +430,25 @@ def list_chats(
         )
 
 
-def search_contacts(query: str) -> List[Contact]:
+def search_contacts(query: str, limit: int = 50) -> List[Contact]:
     """Search people by name (contact names, push names, chat names) or number.
 
     Uses the device store's contacts and LID map when available, so contacts
     without a chat are found and LID chats report the real phone number.
+    Returns at most `limit` people, sorted by name; see search_contacts_counted
+    for the total number of matches.
     """
-    directory = load_directory()
-    return [
+    return search_contacts_counted(query, limit)[0]
+
+
+def search_contacts_counted(query: str, limit: int = 50) -> Tuple[List[Contact], int]:
+    """Like search_contacts, but also returns the total number of matches."""
+    found = load_directory().search(query)
+    contacts_page = [
         Contact(jid=p.jid, name=p.name, phone=p.phone, lid=p.lid, chat_jid=p.chat_jid)
-        for p in directory.search(query)
+        for p in found[:max(limit, 0)]
     ]
+    return contacts_page, len(found)
 
 
 def _fetch_chats(

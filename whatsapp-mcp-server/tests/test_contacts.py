@@ -191,3 +191,25 @@ def test_whatsmeow_db_path_env_override(contacts_db, tmp_path, monkeypatch):
 def test_missing_device_store_is_not_created(seeded_db, tmp_path):
     whatsapp.search_contacts("Alice")
     assert not os.path.exists(tmp_path / "whatsapp.db")
+
+
+# --- search limit / truncation ----------------------------------------------
+
+
+def test_search_contacts_limit_parameter(contacts_db):
+    assert len(whatsapp.search_contacts("Example")) == 4
+    assert [c.name for c in whatsapp.search_contacts("Example", limit=2)] == ["Alice Example", "Bob Example"]
+
+
+def test_search_contacts_tool_reports_truncation(contacts_db):
+    import main
+
+    result = main.search_contacts("Example", limit=2)
+    assert [c.name for c in result["contacts"]] == ["Alice Example", "Bob Example"]
+    assert result["total_matches"] == 4
+    assert result["truncated"] is True
+    assert "2 of 4" in result["note"]
+
+    full = main.search_contacts("Example")
+    assert len(full["contacts"]) == 4
+    assert full["truncated"] is False

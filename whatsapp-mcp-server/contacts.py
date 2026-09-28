@@ -290,8 +290,11 @@ class Directory:
 
     # --- search ------------------------------------------------------------
 
-    def search(self, query: str, limit: int = 50) -> List[Person]:
-        """People whose name contains the query, or whose phone/LID contains its digits."""
+    def search(self, query: str, limit: Optional[int] = None) -> List[Person]:
+        """People whose name contains the query, or whose phone/LID contains its digits.
+
+        Sorted by name. All matches unless `limit` is given.
+        """
         needle = (query or "").strip().lower()
         digits = normalise_number(query)
         if not digits.isdigit():
@@ -303,7 +306,7 @@ class Directory:
             elif digits and ((person.phone and digits in person.phone) or (person.lid and digits in person.lid)):
                 found.append(person)
         found.sort(key=lambda p: ((p.name or "").lower(), p.jid))
-        return found[:limit]
+        return found if limit is None else found[:limit]
 
     # --- sending -----------------------------------------------------------
 
