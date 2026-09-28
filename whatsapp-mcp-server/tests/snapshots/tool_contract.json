@@ -160,6 +160,40 @@
     },
     {
       "arguments": {
+        "jid": "15550000001@s.whatsapp.net"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "[2024-01-02 10:03:00+00:00] Chat: Test Group (120363000000000001@g.us) | ID: g1 | From: Alice Example: group hello\n",
+            "type": "text"
+          }
+        ],
+        "isError": false,
+        "structuredContent": null
+      },
+      "tool": "get_last_interaction"
+    },
+    {
+      "arguments": {
+        "after": 1,
+        "before": 1,
+        "message_id": "a2"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "{\"message\": {\"timestamp\": \"2024-01-02T10:01:00Z\", \"sender\": \"15550000000\", \"content\": \"hello back\", \"is_from_me\": true, \"chat_jid\": \"15550000001@s.whatsapp.net\", \"id\": \"a2\", \"chat_name\": \"Alice Example\", \"media_type\": null, \"filename\": null, \"sender_name\": \"Me\", \"reply_to\": null, \"edited\": false, \"deleted\": false, \"reactions\": {}}, \"before\": [{\"timestamp\": \"2024-01-02T10:00:00Z\", \"sender\": \"15550000001\", \"content\": \"hi there\", \"is_from_me\": false, \"chat_jid\": \"15550000001@s.whatsapp.net\", \"id\": \"a1\", \"chat_name\": \"Alice Example\", \"media_type\": null, \"filename\": null, \"sender_name\": \"Alice Example\", \"reply_to\": null, \"edited\": false, \"deleted\": false, \"reactions\": {}}], \"after\": [{\"timestamp\": \"2024-01-02T10:02:00Z\", \"sender\": \"15550000001\", \"content\": \"see you soon\", \"is_from_me\": false, \"chat_jid\": \"15550000001@s.whatsapp.net\", \"id\": \"a3\", \"chat_name\": \"Alice Example\", \"media_type\": null, \"filename\": null, \"sender_name\": \"Alice Example\", \"reply_to\": null, \"edited\": false, \"deleted\": false, \"reactions\": {}}]}",
+            "type": "text"
+          }
+        ],
+        "isError": false,
+        "structuredContent": null
+      },
+      "tool": "get_message_context"
+    },
+    {
+      "arguments": {
         "message": "hello",
         "recipient": "15550009999"
       },
