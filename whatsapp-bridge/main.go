@@ -72,16 +72,30 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 			direction = "→"
 		}
 
-		// Log based on message type
-		if mediaType != "" {
-			fmt.Printf("[%s] %s %s: [%s: %s] %s\n", timestamp, direction, sender, mediaType, filename, content)
-		} else if content != "" {
-			fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, sender, content)
+		// Content, filenames and names only with -debug
+		if debugLogging {
+			if mediaType != "" {
+				fmt.Printf("[%s] %s %s: [%s: %s] %s\n", timestamp, direction, sender, mediaType, filename, content)
+			} else if content != "" {
+				fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, sender, content)
+			}
+		} else {
+			kind := "text"
+			if mediaType != "" {
+				kind = mediaType
+			}
+			fmt.Printf("[%s] %s %s in %s: id=%s %s, %d chars\n", timestamp, direction, sender, chatJID, msg.Info.ID, kind, len(content))
 		}
 	}
 }
 
 func main() {
+	flags, err := parseFlags(os.Args[1:])
+	if err != nil {
+		os.Exit(2)
+	}
+	debugLogging = flags.debug
+
 	// Set up logger
 	logger := waLog.Stdout("Client", "INFO", true)
 	logger.Infof("Starting WhatsApp client...")
@@ -89,8 +103,9 @@ func main() {
 	// Create database connection for storing session data
 	dbLog := waLog.Stdout("Database", "INFO", true)
 
-	// Create directory for database if it doesn't exist
-	if err := os.MkdirAll("store", 0755); err != nil {
+	// Create directory for database if it doesn't exist (owner-only: it holds
+	// the device session keys, message history and the API token)
+	if err := os.MkdirAll("store", 0700); err != nil {
 		logger.Errorf("Failed to create store directory: %v", err)
 		return
 	}
@@ -128,6 +143,25 @@ func main() {
 		return
 	}
 	defer messageStore.Close()
+
+	// API token and send allowlist (see security.go, allowlist.go)
+	token, err := ensureBridgeToken("store")
+	if err != nil {
+		logger.Errorf("Failed to set up API token: %v", err)
+		return
+	}
+	allowedDirs, err := sendAllowedDirs("store")
+	if err != nil {
+		logger.Errorf("Failed to set up outbox: %v", err)
+		return
+	}
+	if err := hardenStorePermissions("store"); err != nil {
+		logger.Errorf("Failed to restrict store permissions: %v", err)
+		return
+	}
+	if debugLogging {
+		logger.Warnf("Debug logging on: message content, names and file paths will be logged")
+	}
 
 	// Setup event handling for messages and history sync
 	client.AddEventHandler(func(evt interface{}) {
@@ -202,16 +236,6 @@ func main() {
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
 
 	// Start REST API server. Clients must send the token from store/bridge_token.
-	token, err := ensureBridgeToken("store")
-	if err != nil {
-		logger.Errorf("Failed to set up API token: %v", err)
-		return
-	}
-	allowedDirs, err := sendAllowedDirs("store")
-	if err != nil {
-		logger.Errorf("Failed to set up outbox: %v", err)
-		return
-	}
 	logger.Infof("Files can be sent from: %s", strings.Join(allowedDirs, ", "))
 	api := newAPIServer(client, messageStore)
 	api.token = token

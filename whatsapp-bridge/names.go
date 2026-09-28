@@ -17,7 +17,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 	err := messageStore.db.QueryRow("SELECT name FROM chats WHERE jid = ?", chatJID).Scan(&existingName)
 	if err == nil && existingName != "" && !isPlaceholderName(jid, existingName) {
 		// Chat exists with a name, use that
-		logger.Infof("Using existing chat name for %s: %s", chatJID, existingName)
+		debugInfof(logger, "Using existing chat name for %s: %s", chatJID, existingName)
 		return existingName
 	}
 
@@ -26,7 +26,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 
 	if jid.Server == "g.us" {
 		// This is a group chat
-		logger.Infof("Getting name for group: %s", chatJID)
+		debugInfof(logger, "Getting name for group: %s", chatJID)
 
 		// Use conversation data if provided (from history sync)
 		if conversation != nil {
@@ -70,10 +70,10 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 			}
 		}
 
-		logger.Infof("Using group name: %s", name)
+		debugInfof(logger, "Using group name: %s", name)
 	} else {
 		// This is an individual contact
-		logger.Infof("Getting name for contact: %s", chatJID)
+		debugInfof(logger, "Getting name for contact: %s", chatJID)
 
 		// Use contact info, falling back to the JID. The sender isn't a safe
 		// fallback: for a message we sent, it's our own number.
@@ -82,7 +82,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 			name = jid.User
 		}
 
-		logger.Infof("Using contact name: %s", name)
+		debugInfof(logger, "Using contact name: %s", name)
 	}
 
 	return name

@@ -103,11 +103,13 @@ func (s *apiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		req.MediaPath = resolved
 	}
 
-	fmt.Println("Received request to send message", req.Message, req.MediaPath)
+	fmt.Printf("Send request: recipient=%s text=%d chars media=%v\n", req.Recipient, len(req.Message), req.MediaPath != "")
+	debugPrintf("Send request content: %q media_path=%q\n", req.Message, req.MediaPath)
 
 	// Send the message
 	success, message := s.send(req.Recipient, req.Message, req.MediaPath)
-	fmt.Println("Message sent", success, message)
+	fmt.Printf("Send result: recipient=%s success=%v\n", req.Recipient, success)
+	debugPrintf("Send result message: %s\n", message)
 	// Set response headers
 	w.Header().Set("Content-Type", "application/json")
 
