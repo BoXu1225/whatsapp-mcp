@@ -73,6 +73,17 @@ func (f *fakeFetcher) downloadCount() int {
 	return len(f.downloads)
 }
 
+// newMigratedTestStore is newTestStore with the identity migrations (and so
+// migration 6, direct_path) applied, as on a logged-in bridge.
+func newMigratedTestStore(t *testing.T) *MessageStore {
+	t.Helper()
+	store := newTestStore(t)
+	if _, err := store.MigrateIdentity(testIdentity()); err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
 func sha(b []byte) []byte { s := sha256.Sum256(b); return s[:] }
 
 // seedMedia stores a media message with complete download info.
@@ -137,7 +148,7 @@ func TestMediaFileNameByMessageID(t *testing.T) {
 // Two images stored in the same second used to share image_<time>.jpg, and
 // the second download returned the first file.
 func TestDownloadMediaSameSecondNoCollision(t *testing.T) {
-	store := newTestStore(t)
+	store := newMigratedTestStore(t)
 	chat := "15550000001@s.whatsapp.net"
 	same := "image_20240102_030405.jpg"
 	a, b := []byte("first image"), []byte("second image")
@@ -186,7 +197,7 @@ func TestDownloadMediaSameSecondNoCollision(t *testing.T) {
 }
 
 func TestDownloadMediaPrefersStoredDirectPath(t *testing.T) {
-	store := newTestStore(t)
+	store := newMigratedTestStore(t)
 	chat := "15550000001@s.whatsapp.net"
 	content := []byte("img")
 	seedMedia(t, store, "M1", chat, chat, "image", "image_1.jpg", "https://mmg.whatsapp.net/v/t62/from-url.enc?ccb=1", content)
@@ -212,7 +223,7 @@ func TestDownloadMediaPrefersStoredDirectPath(t *testing.T) {
 // A file saved under the old time-based name is only trusted when its
 // SHA-256 matches the message (the name may belong to another message).
 func TestDownloadMediaLegacyFileCheckedBySHA(t *testing.T) {
-	store := newTestStore(t)
+	store := newMigratedTestStore(t)
 	chat := "15550000001@s.whatsapp.net"
 	legacy := "image_20240102_030405.jpg"
 	mine, other := []byte("mine"), []byte("someone else's")
@@ -251,7 +262,7 @@ func TestDownloadMediaLegacyFileCheckedBySHA(t *testing.T) {
 // Media downloaded under the new name before a chat merge is found in the old
 // phone-JID folder too.
 func TestDownloadMediaMergedFolderByMessageID(t *testing.T) {
-	store := newTestStore(t)
+	store := newMigratedTestStore(t)
 	chat := "100000000000003@lid"
 	pnChat := "15550000003@s.whatsapp.net"
 	ts := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -306,7 +317,7 @@ func directPathOf(t *testing.T, store *MessageStore, id string) string {
 
 func TestLiveAndHistoryMediaStoreDirectPath(t *testing.T) {
 	setDebug(t, false)
-	store := newTestStore(t)
+	store := newMigratedTestStore(t)
 	b := newBridgeEvents(nil, store, waLog.Stdout("Test", "ERROR", false))
 	b.markReady()
 
@@ -347,7 +358,7 @@ func TestLiveAndHistoryMediaStoreDirectPath(t *testing.T) {
 // events wait: the handler must not write to a schema that isn't current.
 func TestBridgeEventsWaitUntilReady(t *testing.T) {
 	setDebug(t, false)
-	store := newTestStore(t)
+	store := newMigratedTestStore(t)
 	b := newBridgeEvents(nil, store, waLog.Stdout("Test", "ERROR", false))
 	evt := liveMessageEvent(t, store)
 	done := make(chan bool, 1)
@@ -374,7 +385,7 @@ func TestBridgeEventsWaitUntilReady(t *testing.T) {
 func TestDownloadMediaExpiredRequestsRetry(t *testing.T) {
 	for _, dlErr := range []error{whatsmeow.ErrMediaDownloadFailedWith404, whatsmeow.ErrMediaDownloadFailedWith410} {
 		t.Run(dlErr.Error(), func(t *testing.T) {
-			store := newTestStore(t)
+			store := newMigratedTestStore(t)
 			chat := "120363000000000001@g.us"
 			sender := "100000000000009@lid"
 			content := []byte("old photo")
@@ -440,7 +451,7 @@ func TestDownloadMediaExpiredRequestsRetry(t *testing.T) {
 }
 
 func TestMediaRetryFailureIsReported(t *testing.T) {
-	store := newTestStore(t)
+	store := newMigratedTestStore(t)
 	chat := "15550000001@s.whatsapp.net"
 	seedMedia(t, store, "GONE1", chat, chat, "image", "image_1.jpg", "https://mmg.whatsapp.net/v/t62/gone.enc", []byte("x"))
 	f := newFakeFetcher()
@@ -468,7 +479,7 @@ func TestMediaRetryFailureIsReported(t *testing.T) {
 }
 
 func TestMediaRetryForUnknownMessageIgnored(t *testing.T) {
-	store := newTestStore(t)
+	store := newMigratedTestStore(t)
 	f := newFakeFetcher()
 	m := newMediaService(f, store)
 	called := false
@@ -483,7 +494,7 @@ func TestMediaRetryForUnknownMessageIgnored(t *testing.T) {
 }
 
 func TestDownloadMediaWithoutClient(t *testing.T) {
-	store := newTestStore(t)
+	store := newMigratedTestStore(t)
 	chat := "15550000001@s.whatsapp.net"
 	seedMedia(t, store, "NC1", chat, chat, "image", "image_1.jpg", "https://mmg.whatsapp.net/v/t62/nc.enc", []byte("x"))
 	if _, err := newMediaService(nil, store).download("NC1", chat); err == nil || !strings.Contains(err.Error(), "not connected") {
@@ -529,7 +540,7 @@ func TestAPIDownloadReportsRetryAndOriginalName(t *testing.T) {
 // --- migration 6 ----------------------------------------------------------------
 
 func TestMigration6AddsDirectPath(t *testing.T) {
-	store := newTestStore(t)
+	store := newMigratedTestStore(t)
 	if _, err := store.MigrateIdentity(testIdentity()); err != nil {
 		t.Fatal(err)
 	}
@@ -626,8 +637,8 @@ func TestMigration4To6(t *testing.T) {
 }
 
 // Migrations are applied by version, not by the highest version seen: a
-// migration merged later with a lower number (5) still runs on a database
-// already at 6.
+// database that recorded 6 before migration 5 existed (this branch merged
+// first) still gets 5.
 func TestMigrationGapIsFilledLater(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewMessageStoreAt(dir)
@@ -637,36 +648,20 @@ func TestMigrationGapIsFilledLater(t *testing.T) {
 	if _, err := store.MigrateIdentity(testIdentity()); err != nil {
 		t.Fatal(err)
 	}
-	store.Close()
-
-	orig := migrations
-	t.Cleanup(func() { migrations = orig })
-	ran := false
-	five := migration{version: 5, name: "late_five", needsIdentity: true, run: func(tx *sql.Tx, _ *Identity, _ *migrationReport) error {
-		ran = true
-		return nil
-	}}
-	var withFive []migration
-	for _, m := range orig {
-		if m.version == 6 {
-			withFive = append(withFive, five)
-		}
-		withFive = append(withFive, m)
+	if _, err := store.db.Exec("DELETE FROM schema_version WHERE version = 5"); err != nil {
+		t.Fatal(err)
 	}
-	migrations = withFive
+	store.Close()
 
 	store, err = NewMessageStoreAt(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if pending, err := store.PendingIdentityMigrations(); err != nil || !pending {
-		t.Errorf("PendingIdentityMigrations = %v, %v; want true (5 not applied)", pending, err)
-	}
 	if _, err := store.MigrateIdentity(testIdentity()); err != nil {
 		t.Fatal(err)
 	}
-	if !ran || !contains(appliedVersions(t, store), "5") {
-		t.Errorf("migration 5 not applied on a database at 6 (ran=%v, versions %v)", ran, appliedVersions(t, store))
+	if got := strings.Join(appliedVersions(t, store), ","); got != "1,2,3,4,5,6" {
+		t.Errorf("schema_version = %s, want 5 filled in", got)
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -37,8 +38,12 @@ type DownloadMediaResponse struct {
 	Filename string `json:"filename,omitempty"`
 	Path     string `json:"path,omitempty"`
 
-	OriginalFilename string `json:"original_filename,omitempty"` // TODO(#19) stub
-	RetryRequested   bool   `json:"retry_requested,omitempty"`
+	// OriginalFilename is the stored name (the sender's, for documents);
+	// Filename is the local <message ID>.<ext> name.
+	OriginalFilename string `json:"original_filename,omitempty"`
+	// RetryRequested: the media had expired and a re-upload was requested
+	// from the sender's phone (HTTP 202); ask again shortly.
+	RetryRequested bool `json:"retry_requested,omitempty"`
 }
 
 // apiServer holds what the REST handlers need. send defaults to
@@ -59,11 +64,12 @@ type apiServer struct {
 	isConnected func() bool
 	isLoggedIn  func() bool
 
-	media *mediaService // TODO(#19) stub
+	media *mediaService // downloads and media retries
 }
 
 func newAPIServer(client *whatsmeow.Client, messageStore *MessageStore) *apiServer {
 	s := &apiServer{client: client, store: messageStore, health: newBridgeHealth(time.Now())}
+	s.media = newMediaService(clientFetcher(client), messageStore)
 	s.send = func(recipient, message, mediaPath string, mediaData []byte) (bool, string) {
 		return sendWhatsAppMessage(s.client, recipient, message, mediaPath, mediaData)
 	}
@@ -170,33 +176,32 @@ func (s *apiServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Download the media
-	success, mediaType, filename, path, err := downloadMedia(s.client, s.store, req.MessageID, req.ChatJID)
-
-	// Set response headers
+	res, err := s.media.download(req.MessageID, req.ChatJID)
 	w.Header().Set("Content-Type", "application/json")
-
-	// Handle download result
-	if !success || err != nil {
-		errMsg := "Unknown error"
-		if err != nil {
-			errMsg = err.Error()
-		}
-
-		w.WriteHeader(http.StatusInternalServerError)
+	if errors.Is(err, errMediaRetryRequested) {
+		w.WriteHeader(http.StatusAccepted)
 		json.NewEncoder(w).Encode(DownloadMediaResponse{
-			Success: false,
-			Message: fmt.Sprintf("Failed to download media: %s", errMsg),
+			Success:          false,
+			Message:          err.Error(),
+			OriginalFilename: res.OriginalFilename,
+			RetryRequested:   true,
 		})
 		return
 	}
-
-	// Send successful response
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(DownloadMediaResponse{
+			Success: false,
+			Message: fmt.Sprintf("Failed to download media: %s", err),
+		})
+		return
+	}
 	json.NewEncoder(w).Encode(DownloadMediaResponse{
-		Success:  true,
-		Message:  fmt.Sprintf("Successfully downloaded %s media", mediaType),
-		Filename: filename,
-		Path:     path,
+		Success:          true,
+		Message:          fmt.Sprintf("Successfully downloaded %s media", res.MediaType),
+		Filename:         res.Filename,
+		OriginalFilename: res.OriginalFilename,
+		Path:             res.Path,
 	})
 }
 

@@ -58,14 +58,21 @@ var migrations = []migration{
 	{version: 3, name: "canonical_chats", needsIdentity: true, run: migrateCanonicalChats},
 	{version: 4, name: "canonical_senders", needsIdentity: true, run: migrateCanonicalSenders},
 	{version: 5, name: "message_capture", run: migrateMessageCapture},
+	{version: 6, name: "media_direct_path", run: migrateDirectPath},
 }
 
-func (store *MessageStore) schemaVersion() (int, error) {
-	if _, err := store.db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (
+func (store *MessageStore) ensureSchemaVersionTable() error {
+	_, err := store.db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (
 		version INTEGER PRIMARY KEY,
 		name TEXT NOT NULL,
 		applied_at TEXT NOT NULL
-	)`); err != nil {
+	)`)
+	return err
+}
+
+// schemaVersion is the highest applied migration (used to name backups).
+func (store *MessageStore) schemaVersion() (int, error) {
+	if err := store.ensureSchemaVersionTable(); err != nil {
 		return 0, err
 	}
 	var v int
@@ -73,17 +80,44 @@ func (store *MessageStore) schemaVersion() (int, error) {
 	return v, err
 }
 
-// migrate runs pending migrations. With id == nil it stops before the first
-// migration that needs the identity.
+// appliedMigrations returns the set of applied migration versions.
+func (store *MessageStore) appliedMigrations() (map[int]bool, error) {
+	if err := store.ensureSchemaVersionTable(); err != nil {
+		return nil, err
+	}
+	rows, err := store.db.Query("SELECT version FROM schema_version")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	applied := map[int]bool{}
+	for rows.Next() {
+		var v int
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		applied[v] = true
+	}
+	return applied, rows.Err()
+}
+
+// migrate runs pending migrations in version order. A migration is pending
+// when its version isn't in schema_version, so one added later with a lower
+// number than an applied one still runs. With id == nil it stops before the
+// first pending migration that needs the identity.
 func (store *MessageStore) migrate(id *Identity) (migrationReport, error) {
 	var rep migrationReport
+	applied, err := store.appliedMigrations()
+	if err != nil {
+		return rep, fmt.Errorf("failed to read schema version: %v", err)
+	}
 	current, err := store.schemaVersion()
 	if err != nil {
 		return rep, fmt.Errorf("failed to read schema version: %v", err)
 	}
 	var pending []migration
 	for _, m := range migrations {
-		if m.version <= current {
+		if applied[m.version] {
 			continue
 		}
 		if m.needsIdentity && id == nil {
@@ -150,11 +184,16 @@ func (store *MessageStore) MigrateIdentity(id Identity) (migrationReport, error)
 
 // PendingIdentityMigrations reports whether MigrateIdentity has work to do.
 func (store *MessageStore) PendingIdentityMigrations() (bool, error) {
-	current, err := store.schemaVersion()
+	applied, err := store.appliedMigrations()
 	if err != nil {
 		return false, err
 	}
-	return current < migrations[len(migrations)-1].version, nil
+	for _, m := range migrations {
+		if !applied[m.version] {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (store *MessageStore) hasData() (bool, error) {
@@ -609,4 +648,20 @@ func (store *MessageStore) ensureCaptureSchemaEarly() error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// --- 6: media direct path (#19) ----------------------------------------------
+
+// migrateDirectPath adds messages.direct_path: the media's path on WhatsApp's
+// media servers, used for downloads instead of parsing the URL.
+func migrateDirectPath(tx *sql.Tx, _ *Identity, _ *migrationReport) error {
+	var n int
+	if err := tx.QueryRow("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'direct_path'").Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	_, err := tx.Exec("ALTER TABLE messages ADD COLUMN direct_path TEXT")
+	return err
 }
