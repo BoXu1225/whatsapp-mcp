@@ -111,7 +111,7 @@ This application consists of two main components:
 
 1. Timestamps are stored in UTC (existing rows are converted).
 2. `messages.sender_alt` holds the sender's other address (phone JID for a LID sender, and vice versa) when known.
-3. A 1:1 chat is keyed by the person's LID JID when the LID is known, else by their phone JID. Phone-number and LID copies of the same chat are merged. This step and the next run once the device store has loaded, and only when logged in.
+3. A 1:1 chat is keyed by the person's LID JID when the LID is known, else by their phone JID. Phone-number and LID copies of the same chat are merged (also later, when a message reveals the mapping; the first such merge in a run backs up `messages.db` first). This step and the next run once the device store has loaded, and only when logged in.
 4. Senders are full JIDs without device part (`user@server`). In a 1:1 chat the other person uses the chat's JID. Your own messages use your LID in LID chats and your phone JID elsewhere, including groups. Bare numbers whose server can't be determined are left as they were.
 
 To upgrade, rebuild and restart the bridge. Restart the MCP server too. Until the bridge has migrated the database, time filters may be off by the UTC offset. Downloaded media of a re-keyed chat stays in the old `store/<phone JID>/` folder; `download_media` with the new chat JID fetches it again.
