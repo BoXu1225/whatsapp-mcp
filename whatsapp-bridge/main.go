@@ -138,10 +138,14 @@ type bridgeEvents struct {
 	// pairing on a first run). Message events wait for it.
 	ready     chan struct{}
 	readyOnce sync.Once
+
+	connected chan struct{} // TODO(#21) stub
+	fatal     chan error
 }
 
 func newBridgeEvents(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger) *bridgeEvents {
-	return &bridgeEvents{client: client, store: store, logger: logger, ready: make(chan struct{})}
+	return &bridgeEvents{client: client, store: store, logger: logger, ready: make(chan struct{}),
+		connected: make(chan struct{}), fatal: make(chan error, 1)}
 }
 
 // markReady lets message events through. Safe to call more than once.
