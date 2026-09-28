@@ -32,7 +32,7 @@ def test_list_chats_query_and_paging(seeded_db):
 
 def test_search_contacts_skips_groups(seeded_db):
     contacts = whatsapp.search_contacts("Example")
-    assert [(c.jid, c.phone_number) for c in contacts] == [
+    assert [(c.jid, c.phone) for c in contacts] == [
         (ALICE, "15550000001"),
         (BOB, "15550000002"),
     ]

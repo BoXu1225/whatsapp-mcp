@@ -22,10 +22,19 @@ mcp = FastMCP("whatsapp")
 
 @mcp.tool()
 def search_contacts(query: str) -> List[Dict[str, Any]]:
-    """Search WhatsApp contacts by name or phone number.
-    
+    """Search WhatsApp contacts by name or number, including contacts you have no chat with.
+
+    Each result has separate fields:
+      jid      - the JID to use for this person (their existing chat if any, else phone JID, else LID JID)
+      phone    - phone number with country code, digits only; None if unknown.
+      lid      - WhatsApp LID (an opaque ID, NOT a phone number); None if unknown
+      name     - display name (address book name > business name > push name > chat name)
+      chat_jid - existing direct chat JID, or None
+
+    Never build a phone JID from `lid`.
+
     Args:
-        query: Search term to match against contact names or phone numbers
+        query: Name fragment, or digits of a phone number / LID
     """
     contacts = whatsapp_search_contacts(query)
     return contacts
@@ -48,7 +57,7 @@ def list_messages(
     Args:
         after: Optional ISO-8601 formatted string to only return messages after this date
         before: Optional ISO-8601 formatted string to only return messages before this date
-        sender_phone_number: Optional phone number to filter messages by sender
+        sender_phone_number: Optional phone number, LID or JID to filter messages by sender (matches both PN and LID forms)
         chat_jid: Optional chat JID to filter messages by chat
         query: Optional search term to filter messages by content
         limit: Maximum number of messages to return (default 20)
@@ -110,20 +119,23 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Dict[str, Any]
 
 @mcp.tool()
 def get_direct_chat_by_contact(sender_phone_number: str) -> Dict[str, Any]:
-    """Get WhatsApp chat metadata by sender phone number.
-    
+    """Get the direct chat with a person, by phone number, LID or JID (exact match).
+
+    '+', spaces and dashes are ignored. A phone number also finds the person's
+    @lid chat and vice versa. Returns null if there is no direct chat.
+
     Args:
-        sender_phone_number: The phone number to search for
+        sender_phone_number: Phone number with country code, LID, or JID
     """
     chat = whatsapp_get_direct_chat_by_contact(sender_phone_number)
     return chat
 
 @mcp.tool()
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str, Any]]:
-    """Get all WhatsApp chats involving the contact.
-    
+    """Get all WhatsApp chats involving the contact (their direct chat and groups they wrote in), each once.
+
     Args:
-        jid: The contact's JID to search for
+        jid: The contact's JID, phone number or LID
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
     """
@@ -132,10 +144,10 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str
 
 @mcp.tool()
 def get_last_interaction(jid: str) -> str:
-    """Get most recent WhatsApp message involving the contact.
-    
+    """Get the most recent WhatsApp message involving the contact (in their chat, or sent by them anywhere).
+
     Args:
-        jid: The JID of the contact to search for
+        jid: The contact's JID, phone number or LID
     """
     message = whatsapp_get_last_interaction(jid)
     return message
