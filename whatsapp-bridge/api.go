@@ -41,6 +41,9 @@ type apiServer struct {
 	client *whatsmeow.Client
 	store  *MessageStore
 	send   func(recipient, message, mediaPath string) (bool, string)
+
+	token string // required X-Bridge-Token value
+	port  int    // port the listener is bound to; the Host header must match
 }
 
 func newAPIServer(client *whatsmeow.Client, messageStore *MessageStore) *apiServer {
@@ -56,7 +59,7 @@ func (s *apiServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/send", s.handleSend)
 	mux.HandleFunc("/api/download", s.handleDownload)
-	return mux
+	return s.guard(mux)
 }
 
 // Handler for sending messages
