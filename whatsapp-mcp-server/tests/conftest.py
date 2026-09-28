@@ -20,8 +20,10 @@ import requests
 
 import whatsapp
 
-# Copied verbatim from NewMessageStoreAt in whatsapp-bridge/store.go.
-BRIDGE_SCHEMA = """
+# The schema NewMessageStoreAt in whatsapp-bridge/store.go created before
+# schema versioning (migration 0). LEGACY_BRIDGE_SCHEMA keeps it; BRIDGE_SCHEMA
+# adds what the migrations in whatsapp-bridge/migrate.go add.
+LEGACY_BRIDGE_SCHEMA = """
     CREATE TABLE IF NOT EXISTS chats (
         jid TEXT PRIMARY KEY,
         name TEXT,
@@ -45,6 +47,10 @@ BRIDGE_SCHEMA = """
         PRIMARY KEY (id, chat_jid),
         FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
+"""
+
+BRIDGE_SCHEMA = LEGACY_BRIDGE_SCHEMA + """
+    ALTER TABLE messages ADD COLUMN sender_alt TEXT;
 """
 
 # From go.mau.fi/whatsmeow store/sqlstore/upgrades/00-latest-schema.sql. The
@@ -84,10 +90,12 @@ def bridge_timestamp(dt: datetime) -> str:
 
 
 class FakeMessagesDB:
-    def __init__(self, path):
+    def __init__(self, path, legacy=False):
+        """legacy=True: the schema before migrations (no sender_alt column)."""
         self.path = str(path)
+        self.legacy = legacy
         with sqlite3.connect(self.path) as conn:
-            conn.executescript(BRIDGE_SCHEMA)
+            conn.executescript(LEGACY_BRIDGE_SCHEMA if legacy else BRIDGE_SCHEMA)
 
     def add_chat(self, jid, name, last_message_time):
         with sqlite3.connect(self.path) as conn:
@@ -96,13 +104,18 @@ class FakeMessagesDB:
                 (jid, name, bridge_timestamp(last_message_time)),
             )
 
-    def add_message(self, id, chat_jid, sender, content, timestamp, is_from_me=False, media_type="", filename=""):
+    def add_message(
+        self, id, chat_jid, sender, content, timestamp, is_from_me=False, media_type="", filename="", sender_alt=None
+    ):
+        columns = ["id", "chat_jid", "sender", "content", "timestamp", "is_from_me", "media_type", "filename"]
+        values = [id, chat_jid, sender, content, bridge_timestamp(timestamp), is_from_me, media_type, filename]
+        if sender_alt is not None:
+            columns.append("sender_alt")
+            values.append(sender_alt)
         with sqlite3.connect(self.path) as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO messages"
-                " (id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (id, chat_jid, sender, content, bridge_timestamp(timestamp), is_from_me, media_type, filename),
+                f"INSERT OR REPLACE INTO messages ({', '.join(columns)}) VALUES ({', '.join('?' * len(values))})",
+                values,
             )
 
 
