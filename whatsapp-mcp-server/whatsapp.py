@@ -1,10 +1,12 @@
-import sqlite3
-from datetime import datetime
-from dataclasses import dataclass
-from typing import Optional, List, Tuple
-import os.path
-import requests
 import json
+import os.path
+import sqlite3
+from dataclasses import dataclass
+from datetime import datetime
+from typing import List, Optional, Tuple
+
+import requests
+
 import audio
 
 MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
