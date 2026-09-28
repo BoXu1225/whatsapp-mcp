@@ -48,11 +48,17 @@ def list_messages(
     query: Optional[str] = None,
     limit: int = 20,
     page: int = 0,
-    include_context: bool = True,
+    include_context: Optional[bool] = None,
     context_before: int = 1,
     context_after: int = 1
-) -> List[Dict[str, Any]]:
+) -> str:
     """Get WhatsApp messages matching specified criteria with optional context.
+
+    Output is one line per message, oldest first, each message once:
+      [time] Chat: <name> (<chat JID>) | ID: <message ID> | From: <sender name or Me>: <text>
+    Media messages start with a [type] tag; pass the ID and chat JID to download_media.
+    limit/page select the newest matches (page 0 = most recent), printed oldest to newest.
+    With context, lines starting with '>>' are the matches and the others are context.
     
     Args:
         after: Optional ISO-8601 formatted string to only return messages after this date
@@ -62,7 +68,8 @@ def list_messages(
         query: Optional search term to filter messages by content
         limit: Maximum number of messages to return (default 20)
         page: Page number for pagination (default 0)
-        include_context: Whether to include messages before and after matches (default True)
+        include_context: Whether to include messages before and after matches.
+            Default: False when chat_jid is set (read a thread in order), True otherwise.
         context_before: Number of messages to include before each match (default 1)
         context_after: Number of messages to include after each match (default 1)
     """
@@ -159,16 +166,18 @@ def get_last_interaction(jid: str) -> str:
 def get_message_context(
     message_id: str,
     before: int = 5,
-    after: int = 5
+    after: int = 5,
+    chat_jid: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Get context around a specific WhatsApp message.
-    
+    """Get context around a specific WhatsApp message. `before` and `after` are oldest first.
+
     Args:
         message_id: The ID of the message to get context for
         before: Number of messages to include before the target message (default 5)
         after: Number of messages to include after the target message (default 5)
+        chat_jid: Optional chat JID, to disambiguate IDs that occur in more than one chat
     """
-    context = whatsapp_get_message_context(message_id, before, after)
+    context = whatsapp_get_message_context(message_id, before, after, chat_jid)
     return context
 
 @mcp.tool()

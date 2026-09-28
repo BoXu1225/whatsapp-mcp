@@ -147,6 +147,8 @@ class Message:
     id: str
     chat_name: Optional[str] = None
     media_type: Optional[str] = None
+    filename: Optional[str] = None
+    sender_name: Optional[str] = None
 
 @dataclass
 class Chat:
@@ -197,34 +199,109 @@ def get_sender_name(sender_jid: str, directory: Optional[contacts.Directory] = N
     return directory.name_for(sender_jid) or sender_jid
 
 
-def format_message(message: Message, show_chat_info: bool = True, directory: Optional[contacts.Directory] = None) -> str:
-    """Format a single message as one line."""
-    output = ""
-    
-    if show_chat_info and message.chat_name:
-        output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] Chat: {message.chat_name} "
-    else:
-        output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] "
-        
-    content_prefix = ""
-    if hasattr(message, 'media_type') and message.media_type:
-        content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
-    
-    sender_name = get_sender_name(message.sender, directory) if not message.is_from_me else "Me"
-    output += f"From: {sender_name}: {content_prefix}{message.content}\n"
-    return output
+def _content_text(content: Optional[str], media_type: Optional[str], filename: Optional[str] = None) -> str:
+    """Message text, with a [media_type] tag in front of media messages."""
+    content = content or ""
+    if not media_type:
+        return content
+    tag = f"[{media_type}]"
+    return f"{tag} {content}" if content else tag
 
-def format_messages_list(messages: List[Message], show_chat_info: bool = True, directory: Optional[contacts.Directory] = None) -> str:
-    output = ""
+
+def format_message(message: Message, show_chat_info: bool = True, directory: Optional[contacts.Directory] = None, marker: str = "") -> str:
+    """Format a single message as one line: time, chat, message ID, sender, content.
+
+    `show_chat_info` is kept for compatibility; the chat is always shown so every
+    line carries what download_media and get_message_context need.
+    """
+    if message.is_from_me:
+        sender_name = "Me"
+    else:
+        sender_name = message.sender_name or get_sender_name(message.sender, directory)
+    chat = f"{message.chat_name} ({message.chat_jid})" if message.chat_name else message.chat_jid
+    content = _content_text(message.content, message.media_type, message.filename)
+    return (
+        f"{marker}[{message.timestamp:%Y-%m-%d %H:%M:%S}] Chat: {chat} | ID: {message.id} | "
+        f"From: {sender_name}: {content}\n"
+    )
+
+
+def format_messages_list(
+    messages: List[Message],
+    show_chat_info: bool = True,
+    directory: Optional[contacts.Directory] = None,
+    matched_ids: Optional[set] = None,
+) -> str:
+    """Format messages, one per line, in the order given.
+
+    With `matched_ids`, lines of matching messages start with '>> ' and context
+    lines with three spaces, after a one-line legend.
+    """
     if not messages:
-        output += "No messages to display."
-        return output
+        return "No messages to display."
 
     if directory is None:
         directory = load_directory()
+    output = ""
+    if matched_ids is not None:
+        output += "Oldest first. Lines starting with '>>' match the filters; the others are context.\n"
     for message in messages:
-        output += format_message(message, show_chat_info, directory)
+        marker = ""
+        if matched_ids is not None:
+            marker = ">> " if (message.chat_jid, message.id) in matched_ids else "   "
+        output += format_message(message, show_chat_info, directory, marker)
     return output
+
+
+_MESSAGE_COLUMNS = (
+    "m.timestamp, m.sender, c.name, m.content, m.is_from_me, m.chat_jid, m.id, m.media_type, m.filename, m.rowid"
+)
+_MESSAGE_FROM = "FROM messages m JOIN chats c ON m.chat_jid = c.jid"
+
+
+def _message_from_row(row: tuple, directory: contacts.Directory) -> Message:
+    timestamp, sender, chat_name, content, is_from_me, chat_jid, msg_id, media_type, filename, _rowid = row
+    return Message(
+        timestamp=datetime.fromisoformat(timestamp),
+        sender=sender,
+        content=content,
+        is_from_me=bool(is_from_me),
+        chat_jid=chat_jid,
+        id=msg_id,
+        chat_name=directory.chat_display_name(chat_jid, chat_name),
+        media_type=media_type or None,
+        filename=filename or None,
+        sender_name="Me" if is_from_me else (directory.name_for(sender) or sender),
+    )
+
+
+def _neighbours(conn: sqlite3.Connection, row: tuple, count: int, direction: str) -> List[tuple]:
+    """Up to `count` messages of the same chat before/after `row`, oldest first.
+
+    Order is (timestamp, rowid), so messages in the same second are not lost.
+    """
+    if count <= 0:
+        return []
+    timestamp, chat_jid, rowid = row[0], row[5], row[9]
+    if direction == "before":
+        cond, order = "(m.timestamp < ? OR (m.timestamp = ? AND m.rowid < ?))", "DESC"
+    else:
+        cond, order = "(m.timestamp > ? OR (m.timestamp = ? AND m.rowid > ?))", "ASC"
+    rows = conn.execute(
+        f"SELECT {_MESSAGE_COLUMNS} {_MESSAGE_FROM} WHERE m.chat_jid = ? AND {cond}"
+        f" ORDER BY m.timestamp {order}, m.rowid {order} LIMIT ?",
+        (chat_jid, timestamp, timestamp, rowid, count),
+    ).fetchall()
+    return rows[::-1] if direction == "before" else rows
+
+
+def _iso_param(name: str, value: str) -> str:
+    """Validate an ISO-8601 filter and format it like the stored timestamps compare."""
+    try:
+        return datetime.fromisoformat(value).isoformat(" ")
+    except ValueError:
+        raise ValueError(f"Invalid date format for '{name}': {value}. Please use ISO-8601 format.")
+
 
 def list_messages(
     after: Optional[str] = None,
@@ -234,191 +311,89 @@ def list_messages(
     query: Optional[str] = None,
     limit: int = 20,
     page: int = 0,
-    include_context: bool = True,
+    include_context: Optional[bool] = None,
     context_before: int = 1,
     context_after: int = 1
-) -> List[Message]:
-    """Get messages matching the specified criteria with optional context."""
-    try:
-        conn = _open_messages_db()
-        cursor = conn.cursor()
-        
-        # Build base query
-        query_parts = ["SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type FROM messages"]
-        query_parts.append("JOIN chats ON messages.chat_jid = chats.jid")
-        where_clauses = []
-        params = []
-        
-        # Add filters
-        if after:
-            try:
-                after = datetime.fromisoformat(after)
-            except ValueError:
-                raise ValueError(f"Invalid date format for 'after': {after}. Please use ISO-8601 format.")
-            
-            where_clauses.append("messages.timestamp > ?")
-            params.append(after)
+) -> str:
+    """Get messages matching the criteria, formatted one per line, oldest first.
 
-        if before:
-            try:
-                before = datetime.fromisoformat(before)
-            except ValueError:
-                raise ValueError(f"Invalid date format for 'before': {before}. Please use ISO-8601 format.")
-            
-            where_clauses.append("messages.timestamp < ?")
-            params.append(before)
+    `limit`/`page` select matches newest-first (page 0 is the most recent
+    `limit` matches); the page is then printed oldest to newest. Each message
+    appears once. include_context defaults to False when chat_jid is set and
+    True otherwise; with context, matches are marked '>>'.
+    """
+    if include_context is None:
+        include_context = chat_jid is None
+
+    where_clauses = []
+    params: list = []
+    if after:
+        where_clauses.append("m.timestamp > ?")
+        params.append(_iso_param("after", after))
+    if before:
+        where_clauses.append("m.timestamp < ?")
+        params.append(_iso_param("before", before))
+
+    with _connect() as conn:
+        directory = load_directory(conn)
 
         if sender_phone_number:
             # Match every sender format for this person: bare user and full JID, PN and LID.
-            sender_ids = load_directory(conn).sender_ids(sender_phone_number)
-            where_clauses.append(f"messages.sender IN ({', '.join('?' * len(sender_ids))})")
+            sender_ids = directory.sender_ids(sender_phone_number)
+            where_clauses.append(f"m.sender IN ({', '.join('?' * len(sender_ids))})")
             params.extend(sender_ids)
-            
         if chat_jid:
-            where_clauses.append("messages.chat_jid = ?")
+            where_clauses.append("m.chat_jid = ?")
             params.append(chat_jid)
-            
         if query:
-            where_clauses.append("LOWER(messages.content) LIKE LOWER(?)")
+            where_clauses.append("LOWER(m.content) LIKE LOWER(?)")
             params.append(f"%{query}%")
-            
-        if where_clauses:
-            query_parts.append("WHERE " + " AND ".join(where_clauses))
-            
-        # Add pagination
-        offset = page * limit
-        query_parts.append("ORDER BY messages.timestamp DESC")
-        query_parts.append("LIMIT ? OFFSET ?")
-        params.extend([limit, offset])
-        
-        cursor.execute(" ".join(query_parts), tuple(params))
-        messages = cursor.fetchall()
-        
-        result = []
-        for msg in messages:
-            message = Message(
-                timestamp=datetime.fromisoformat(msg[0]),
-                sender=msg[1],
-                chat_name=msg[2],
-                content=msg[3],
-                is_from_me=msg[4],
-                chat_jid=msg[5],
-                id=msg[6],
-                media_type=msg[7]
-            )
-            result.append(message)
-            
-        if include_context and result:
-            # Add context for each message
-            messages_with_context = []
-            for msg in result:
-                context = get_message_context(msg.id, context_before, context_after)
-                messages_with_context.extend(context.before)
-                messages_with_context.append(context.message)
-                messages_with_context.extend(context.after)
-            
-            return format_messages_list(messages_with_context, show_chat_info=True)
-            
-        # Format and display messages without context
-        return format_messages_list(result, show_chat_info=True)    
-        
-    except sqlite3.Error as e:
-        raise WhatsAppDBError(f"WhatsApp database query failed: {e}") from e
-    finally:
-        if 'conn' in locals():
-            conn.close()
+
+        where = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        matches = conn.execute(
+            f"SELECT {_MESSAGE_COLUMNS} {_MESSAGE_FROM} {where}"
+            " ORDER BY m.timestamp DESC, m.rowid DESC LIMIT ? OFFSET ?",
+            (*params, limit, page * limit),
+        ).fetchall()
+
+        rows = {(r[5], r[6]): r for r in matches}
+        if include_context:
+            for match in matches:
+                for r in _neighbours(conn, match, context_before, "before") + _neighbours(conn, match, context_after, "after"):
+                    rows.setdefault((r[5], r[6]), r)
+
+        ordered = sorted(rows.values(), key=lambda r: (r[0], r[9]))
+        messages = [_message_from_row(r, directory) for r in ordered]
+        matched = {(r[5], r[6]) for r in matches} if include_context else None
+        return format_messages_list(messages, directory=directory, matched_ids=matched)
 
 
 def get_message_context(
     message_id: str,
     before: int = 5,
-    after: int = 5
+    after: int = 5,
+    chat_jid: Optional[str] = None,
 ) -> MessageContext:
-    """Get context around a specific message."""
-    try:
-        conn = _open_messages_db()
-        cursor = conn.cursor()
-        
-        # Get the target message first
-        cursor.execute("""
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type
-            FROM messages
-            JOIN chats ON messages.chat_jid = chats.jid
-            WHERE messages.id = ?
-        """, (message_id,))
-        msg_data = cursor.fetchone()
-        
-        if not msg_data:
+    """Get a message and the messages around it in its chat; before/after are oldest first.
+
+    Message IDs are unique per chat; pass chat_jid when the same ID could occur in several chats.
+    """
+    with _connect() as conn:
+        directory = load_directory(conn)
+        sql = f"SELECT {_MESSAGE_COLUMNS} {_MESSAGE_FROM} WHERE m.id = ?"
+        params: tuple = (message_id,)
+        if chat_jid:
+            sql += " AND m.chat_jid = ?"
+            params += (chat_jid,)
+        target = conn.execute(sql + " ORDER BY m.timestamp DESC LIMIT 1", params).fetchone()
+        if not target:
             raise ValueError(f"Message with ID {message_id} not found")
-            
-        target_message = Message(
-            timestamp=datetime.fromisoformat(msg_data[0]),
-            sender=msg_data[1],
-            chat_name=msg_data[2],
-            content=msg_data[3],
-            is_from_me=msg_data[4],
-            chat_jid=msg_data[5],
-            id=msg_data[6],
-            media_type=msg_data[8]
-        )
-        
-        # Get messages before
-        cursor.execute("""
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
-            FROM messages
-            JOIN chats ON messages.chat_jid = chats.jid
-            WHERE messages.chat_jid = ? AND messages.timestamp < ?
-            ORDER BY messages.timestamp DESC
-            LIMIT ?
-        """, (msg_data[7], msg_data[0], before))
-        
-        before_messages = []
-        for msg in cursor.fetchall():
-            before_messages.append(Message(
-                timestamp=datetime.fromisoformat(msg[0]),
-                sender=msg[1],
-                chat_name=msg[2],
-                content=msg[3],
-                is_from_me=msg[4],
-                chat_jid=msg[5],
-                id=msg[6],
-                media_type=msg[7]
-            ))
-        
-        # Get messages after
-        cursor.execute("""
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
-            FROM messages
-            JOIN chats ON messages.chat_jid = chats.jid
-            WHERE messages.chat_jid = ? AND messages.timestamp > ?
-            ORDER BY messages.timestamp ASC
-            LIMIT ?
-        """, (msg_data[7], msg_data[0], after))
-        
-        after_messages = []
-        for msg in cursor.fetchall():
-            after_messages.append(Message(
-                timestamp=datetime.fromisoformat(msg[0]),
-                sender=msg[1],
-                chat_name=msg[2],
-                content=msg[3],
-                is_from_me=msg[4],
-                chat_jid=msg[5],
-                id=msg[6],
-                media_type=msg[7]
-            ))
-        
+
         return MessageContext(
-            message=target_message,
-            before=before_messages,
-            after=after_messages
+            message=_message_from_row(target, directory),
+            before=[_message_from_row(r, directory) for r in _neighbours(conn, target, before, "before")],
+            after=[_message_from_row(r, directory) for r in _neighbours(conn, target, after, "after")],
         )
-        
-    except sqlite3.Error as e:
-        raise WhatsAppDBError(f"WhatsApp database query failed: {e}") from e
-    finally:
-        if 'conn' in locals():
-            conn.close()
 
 
 def list_chats(
@@ -541,11 +516,9 @@ def get_last_interaction(jid: str) -> Optional[str]:
         directory = load_directory(conn)
         chat_jids = directory.direct_chat_jids(jid)
         sender_ids = directory.sender_ids(jid)
-        msg_data = conn.execute(
+        row = conn.execute(
             f"""
-            SELECT m.timestamp, m.sender, c.name, m.content, m.is_from_me, c.jid, m.id, m.media_type
-            FROM messages m
-            JOIN chats c ON m.chat_jid = c.jid
+            SELECT {_MESSAGE_COLUMNS} {_MESSAGE_FROM}
             WHERE m.chat_jid IN ({', '.join('?' * len(chat_jids))})
                OR m.sender IN ({', '.join('?' * len(sender_ids))})
             ORDER BY m.timestamp DESC, m.rowid DESC
@@ -553,21 +526,9 @@ def get_last_interaction(jid: str) -> Optional[str]:
             """,
             (*chat_jids, *sender_ids),
         ).fetchone()
-
-        if not msg_data:
+        if not row:
             return None
-
-        message = Message(
-            timestamp=datetime.fromisoformat(msg_data[0]),
-            sender=msg_data[1],
-            chat_name=directory.chat_display_name(msg_data[5], msg_data[2]),
-            content=msg_data[3],
-            is_from_me=msg_data[4],
-            chat_jid=msg_data[5],
-            id=msg_data[6],
-            media_type=msg_data[7]
-        )
-        return format_message(message, directory=directory)
+        return format_message(_message_from_row(row, directory), directory=directory)
 
 
 def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]:
