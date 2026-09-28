@@ -1,6 +1,7 @@
 import json
 import os.path
 import sqlite3
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, Tuple
@@ -844,7 +845,7 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
             return None
             
     except BridgeTokenError as e:
-        print(str(e))
+        print(str(e), file=sys.stderr)  # stdout is the MCP stdio transport
         return None
     except requests.RequestException as e:
         print(f"Request error: {str(e)}")
