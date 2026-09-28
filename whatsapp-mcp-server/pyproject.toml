@@ -5,8 +5,8 @@ description = "MCP server for reading, searching and sending your personal Whats
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp[cli]>=1.6.0",
-    "requests>=2.32.3",
+    "mcp[cli]>=2.2.0",
+    "requests>=2.34.2",
 ]
 
 [dependency-groups]
