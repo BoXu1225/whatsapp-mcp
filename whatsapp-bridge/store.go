@@ -46,7 +46,7 @@ func NewMessageStoreAt(dir string) (*MessageStore, error) {
 	}
 
 	// Open SQLite database for messages
-	db, err := sql.Open("sqlite3", "file:"+dir+"/messages.db?_foreign_keys=on")
+	db, err := sql.Open("sqlite3", messagesDSN(dir))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
@@ -94,6 +94,13 @@ func NewMessageStoreAt(dir string) (*MessageStore, error) {
 		return nil, fmt.Errorf("failed to add message capture columns: %v", err)
 	}
 	return store, nil
+}
+
+// messagesDSN is the go-sqlite3 DSN for dir/messages.db. The pragmas apply to
+// every pooled connection: WAL lets the MCP server read while the bridge
+// writes, and a writer waits up to 5 s for a lock instead of failing at once.
+func messagesDSN(dir string) string {
+	return "file:" + dir + "/messages.db?_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000"
 }
 
 // Close the database connection
