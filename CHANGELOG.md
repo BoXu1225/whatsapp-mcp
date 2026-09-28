@@ -24,7 +24,10 @@ which this fork started from.
   Reactions go to a new `reactions` table, one per message and sender (#15).
 - Edits update the stored text and set `messages.edited_at`; messages deleted
   for everyone are marked `is_deleted` with `deleted_at` and keep their text
-  unless the bridge runs with the new `-purge-deleted` flag (#16).
+  unless the bridge runs with the new `-purge-deleted` flag (#16). Only the
+  author's edits and deletes count; in a group a delete by someone else (an
+  admin) is recorded in `deleted_by` and never clears the text. A message
+  delivered again keeps its original sender.
 - `list_messages` and `get_message_context` show replies
   (`[↪ reply to <id>]`), `[deleted]`, `(edited)` and reactions
   (`[reactions: 👍×2]`); `get_message_context` messages gain `reply_to`,
@@ -63,7 +66,7 @@ which this fork started from.
    Bare numbers whose server can't be determined are left and counted.
 
 5. `message_capture`: adds `messages.reply_to`, `edited_at`, `is_deleted`
-   (default 0) and `deleted_at`, and the `reactions` table. Only adds; no
+   (default 0), `deleted_at` and `deleted_by`, and the `reactions` table. Only adds; no
    existing row changes.
 
 Migrations 3 and 4 need the device store and run only when logged in; they

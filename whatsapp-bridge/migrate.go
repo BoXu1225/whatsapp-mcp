@@ -549,6 +549,7 @@ var captureColumns = []struct{ name, def string }{
 	{"edited_at", "TIMESTAMP"},                   // time of the last applied edit, NULL if never edited
 	{"is_deleted", "INTEGER NOT NULL DEFAULT 0"}, // 1 once revoked ("deleted for everyone")
 	{"deleted_at", "TIMESTAMP"},                  // time of the revoke
+	{"deleted_by", "TEXT"},                       // revoker, when not the author (group admin); NULL otherwise
 }
 
 // captureSchemaSQL creates the reactions table: one reaction per sender and
@@ -562,7 +563,8 @@ const captureSchemaSQL = `CREATE TABLE IF NOT EXISTS reactions (
 	PRIMARY KEY (message_id, chat_jid, sender)
 )`
 
-// migrateMessageCapture adds reply_to, edited_at, is_deleted, deleted_at and
+// migrateMessageCapture adds reply_to, edited_at, is_deleted, deleted_at,
+// deleted_by and
 // the reactions table. Idempotent: existing columns are skipped.
 func migrateMessageCapture(tx *sql.Tx, _ *Identity, _ *migrationReport) error {
 	return addCaptureSchema(tx)

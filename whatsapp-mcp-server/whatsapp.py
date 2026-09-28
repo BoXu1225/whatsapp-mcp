@@ -151,7 +151,7 @@ class Message:
     sender_name: Optional[str] = None
     reply_to: Optional[str] = None  # ID of the quoted message (#15)
     edited: bool = False  # the text was edited after sending (#16)
-    deleted: bool = False  # deleted for everyone (#16); the text is kept unless the bridge runs with -purge-deleted
+    deleted: bool = False  # deleted for everyone (#16); shown as "[deleted] <text>": the text is kept unless the bridge runs with -purge-deleted
     reactions: Dict[str, int] = field(default_factory=dict)  # emoji -> count, most frequent first (#15)
 
 @dataclass
@@ -220,7 +220,10 @@ def _reactions_text(reactions: Dict[str, int]) -> str:
 
 def _decorated_content(message: Message) -> str:
     """Message text with its media tag and capture markers:
-    '[↪ reply to <id>] ', '[deleted] ', ' (edited)' and ' [reactions: 👍×2]'."""
+    '[↪ reply to <id>] ', '[deleted] ', ' (edited)' and ' [reactions: 👍×2]'.
+
+    A message deleted for everyone keeps its text, shown as "[deleted] <text>",
+    unless the bridge runs with -purge-deleted (then just "[deleted]")."""
     content = _content_text(message.content, message.media_type, message.filename)
     if message.deleted:
         content = f"[deleted] {content}" if content else "[deleted]"
@@ -290,12 +293,29 @@ _CAPTURE_COLUMNS = ", m.reply_to, m.edited_at IS NOT NULL, COALESCE(m.is_deleted
 _NO_CAPTURE_COLUMNS = ", NULL, 0, 0"
 
 
-def _has_capture_schema(conn: sqlite3.Connection) -> bool:
+# Database paths known to have migration 5's schema. Only a positive result
+# is cached: once there, the columns stay; a missing schema is checked again
+# so a bridge that migrates while the MCP server runs is picked up.
+_capture_schema_cache: set = set()
+
+
+def _probe_capture_schema(conn: sqlite3.Connection) -> bool:
     """Whether messages.db has migration 5's columns and reactions table."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
     if not {"reply_to", "edited_at", "is_deleted"} <= cols:
         return False
     return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'reactions'").fetchone() is not None
+
+
+def _has_capture_schema(conn: sqlite3.Connection) -> bool:
+    """_probe_capture_schema, cached per database path (conn is on MESSAGES_DB_PATH)."""
+    key = os.path.realpath(MESSAGES_DB_PATH)
+    if key in _capture_schema_cache:
+        return True
+    if _probe_capture_schema(conn):
+        _capture_schema_cache.add(key)
+        return True
+    return False
 
 
 def _message_columns(conn: sqlite3.Connection) -> str:

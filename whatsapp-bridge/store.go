@@ -200,7 +200,7 @@ func (store *MessageStore) storeMessageRow(m messageRow) error {
 		(id, chat_jid, sender, sender_alt, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, reply_to)
 		VALUES (?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))
 		ON CONFLICT(id, chat_jid) DO UPDATE SET
-			sender = excluded.sender,
+			sender = CASE WHEN COALESCE(messages.sender, '') = '' THEN excluded.sender ELSE messages.sender END,
 			sender_alt = COALESCE(excluded.sender_alt, messages.sender_alt),
 			content = CASE WHEN messages.edited_at IS NOT NULL OR COALESCE(messages.is_deleted, 0) != 0
 				THEN messages.content ELSE excluded.content END,
@@ -244,20 +244,33 @@ func (store *MessageStore) ApplyEdit(chatJID, targetID, sender, senderAlt, conte
 }
 
 // MarkDeleted marks message targetID in chatJID as deleted for everyone
-// (revoked) at `at` (#16). The content is kept unless the store was opened
-// with purgeDeleted. Only the author can revoke, unless anySender (a group,
-// where admins can delete others' messages). Returns whether a message was
-// marked.
+// (revoked) at `at` (#16). A revoke by the author (sender or sender_alt)
+// keeps the content unless the store was opened with purgeDeleted. With
+// anySender (a group, where admins can delete others' messages, but the
+// bridge can't check who is an admin) a revoke by someone else also marks
+// the message deleted and records the revoker in deleted_by, but never
+// clears the content. Returns whether a message was marked.
 func (store *MessageStore) MarkDeleted(chatJID, targetID, sender, senderAlt string, anySender bool, at time.Time) (bool, error) {
 	res, err := store.conn().Exec(
-		`UPDATE messages SET is_deleted = 1, deleted_at = COALESCE(deleted_at, ?),
+		`UPDATE messages SET is_deleted = 1, deleted_at = COALESCE(deleted_at, ?), deleted_by = NULL,
 			content = CASE WHEN ? THEN '' ELSE content END
-		WHERE id = ? AND chat_jid = ? AND (? OR `+senderMatchSQL+`)`,
-		at.UTC(), store.purgeDeleted, targetID, chatJID, anySender, sender, senderAlt, sender)
+		WHERE id = ? AND chat_jid = ? AND `+senderMatchSQL,
+		at.UTC(), store.purgeDeleted, targetID, chatJID, sender, senderAlt, sender)
 	if err != nil {
 		return false, err
 	}
 	n, err := res.RowsAffected()
+	if err != nil || n > 0 || !anySender {
+		return n > 0, err
+	}
+	res, err = store.conn().Exec(
+		`UPDATE messages SET is_deleted = 1, deleted_at = ?, deleted_by = ?
+		WHERE id = ? AND chat_jid = ? AND COALESCE(is_deleted, 0) = 0`,
+		at.UTC(), sender, targetID, chatJID)
+	if err != nil {
+		return false, err
+	}
+	n, err = res.RowsAffected()
 	return n > 0, err
 }
 
