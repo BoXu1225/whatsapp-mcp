@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"time"
@@ -42,7 +43,7 @@ type DownloadMediaResponse struct {
 type apiServer struct {
 	client *whatsmeow.Client
 	store  *MessageStore
-	send   func(recipient, message, mediaPath string) (bool, string)
+	send   func(recipient, message, mediaPath string, mediaData []byte) (bool, string)
 
 	token string // required X-Bridge-Token value
 	port  int    // port the listener is bound to; the Host header must match
@@ -52,8 +53,8 @@ type apiServer struct {
 
 func newAPIServer(client *whatsmeow.Client, messageStore *MessageStore) *apiServer {
 	s := &apiServer{client: client, store: messageStore}
-	s.send = func(recipient, message, mediaPath string) (bool, string) {
-		return sendWhatsAppMessage(s.client, recipient, message, mediaPath)
+	s.send = func(recipient, message, mediaPath string, mediaData []byte) (bool, string) {
+		return sendWhatsAppMessage(s.client, recipient, message, mediaPath, mediaData)
 	}
 	return s
 }
@@ -92,12 +93,21 @@ func (s *apiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Media is read from the handle openSendFile checked, not re-opened by
+	// path, so the file can't be swapped after the allowlist check.
+	var mediaData []byte
 	if req.MediaPath != "" {
-		resolved, err := resolveSendPath(req.MediaPath, s.allowedDirs)
+		f, resolved, err := openSendFile(req.MediaPath, s.allowedDirs)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			json.NewEncoder(w).Encode(SendMessageResponse{Success: false, Message: err.Error()})
+			return
+		}
+		mediaData, err = io.ReadAll(f)
+		f.Close()
+		if err != nil {
+			http.Error(w, "Failed to read media file", http.StatusInternalServerError)
 			return
 		}
 		req.MediaPath = resolved
@@ -107,7 +117,7 @@ func (s *apiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	debugPrintf("Send request content: %q media_path=%q\n", req.Message, req.MediaPath)
 
 	// Send the message
-	success, message := s.send(req.Recipient, req.Message, req.MediaPath)
+	success, message := s.send(req.Recipient, req.Message, req.MediaPath, mediaData)
 	fmt.Printf("Send result: recipient=%s success=%v\n", req.Recipient, success)
 	debugPrintf("Send result message: %s\n", message)
 	// Set response headers
