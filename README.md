@@ -105,6 +105,17 @@ This application consists of two main components:
 - Downloaded media goes to `whatsapp-bridge/store/<chat>/`; files to send go in `whatsapp-bridge/store/outbox/`.
 - `store/` is private data and is git-ignored.
 
+### Schema migrations
+
+`messages.db` carries a `schema_version` table. On start the bridge applies pending migrations in order, each in its own transaction. Before the first one runs on a database with data it saves a copy as `store/messages.db.bak-<version>-<UTC timestamp>` (mode 0600). If a migration fails, its changes are rolled back and the bridge exits with status 1, naming the backup. Current migrations:
+
+1. Timestamps are stored in UTC (existing rows are converted).
+2. `messages.sender_alt` holds the sender's other address (phone JID for a LID sender, and vice versa) when known.
+3. A 1:1 chat is keyed by the person's LID JID when the LID is known, else by their phone JID. Phone-number and LID copies of the same chat are merged. This step and the next run once the device store has loaded, and only when logged in.
+4. Senders are full JIDs without device part (`user@server`). In a 1:1 chat the other person uses the chat's JID. Your own messages use your LID in LID chats and your phone JID elsewhere, including groups. Bare numbers whose server can't be determined are left as they were.
+
+To upgrade, rebuild and restart the bridge. Restart the MCP server too. Until the bridge has migrated the database, time filters may be off by the UTC offset. Downloaded media of a re-keyed chat stays in the old `store/<phone JID>/` folder; `download_media` with the new chat JID fetches it again.
+
 ## Usage
 
 ### MCP Tools
@@ -144,6 +155,8 @@ If you have prompts or scripts built on the earlier tool output, note:
   - Media shows as `[type: filename] caption`.
   - `%` and `_` in `query` match literally (the same holds for `list_chats`).
 - `get_message_context` returns `before` oldest first.
+- Times are shown in local time with their UTC offset (`2024-03-31 02:30:00+01:00`). `after`, `before` and `since` accept `Z` or an offset; a time without one is local time.
+- A 1:1 chat that used to appear twice (phone JID and `@lid` JID) is one chat, keyed by the `@lid` JID.
 - Chat objects:
   - `last_message` is the chat's newest stored message, with media rendered as `[type: filename]`.
   - New fields: `last_message_id`, `last_sender_name` and `last_message_at`.
