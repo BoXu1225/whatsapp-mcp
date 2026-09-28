@@ -51,6 +51,16 @@ def token(seeded_db):
     return store
 
 
+@pytest.fixture(autouse=True)
+def fresh_header_cache(monkeypatch):
+    """Each test starts with an empty header cache and a controllable clock."""
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(status, "_now", lambda: clock["now"])
+    status.clear_header_cache()
+    yield clock
+    status.clear_header_cache()
+
+
 def answer(monkeypatch, response=None, exc=None):
     """Make requests.get return `response` (or raise `exc`); returns the recorded calls."""
     calls = []
@@ -199,16 +209,50 @@ def test_list_messages_header_when_up(token, monkeypatch):
 def test_list_chats_header(token, monkeypatch):
     answer(monkeypatch, exc=requests.ConnectionError("refused"))
     result = main.list_chats()
-    assert isinstance(result[0], str)
-    assert "bridge down" in result[0].lower()
-    assert [c.jid for c in result[1:]][0] == BOB
+    assert set(result) == {"status", "chats"}
+    assert "bridge down" in result["status"].lower()
+    assert result["chats"][0].jid == BOB
 
 
 def test_list_awaiting_reply_header(token, monkeypatch):
     answer(monkeypatch, FakeResponse(200, HEALTHY))
     result = main.list_awaiting_reply()
-    assert "bridge up" in result[0].lower()
-    assert [c.jid for c in result[1:]] == [BOB, ALICE]
+    assert "bridge up" in result["status"].lower()
+    assert [c.jid for c in result["chats"]] == [BOB, ALICE]
+
+
+def test_header_uses_short_timeout(token, monkeypatch):
+    calls = answer(monkeypatch, FakeResponse(200, HEALTHY))
+    main.list_chats()
+    assert calls[0]["timeout"] == status.HEADER_TIMEOUT
+    assert status.HEADER_TIMEOUT <= 0.5
+
+
+def test_header_status_cached(token, monkeypatch, fresh_header_cache):
+    calls = answer(monkeypatch, FakeResponse(200, HEALTHY))
+    main.list_chats()
+    main.list_messages(chat_jid=ALICE)
+    fresh_header_cache["now"] += status.HEADER_CACHE_SECONDS - 0.1
+    main.list_awaiting_reply()
+    assert len(calls) == 1
+    fresh_header_cache["now"] += 0.2
+    main.list_chats()
+    assert len(calls) == 2
+
+
+def test_header_cache_follows_database_path(token, monkeypatch, tmp_path):
+    answer(monkeypatch, exc=requests.ConnectionError("refused"))
+    assert "bridge down" in status.freshness_header().lower()
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(tmp_path / "elsewhere" / "messages.db"))
+    assert "none" in status.freshness_header()
+
+
+def test_get_status_not_cached_and_uses_2s(token, monkeypatch):
+    calls = answer(monkeypatch, FakeResponse(200, HEALTHY))
+    main.list_chats()
+    main.get_status()
+    main.get_status()
+    assert [c["timeout"] for c in calls] == [status.HEADER_TIMEOUT, 2, 2]
 
 
 def test_header_is_one_line(token, monkeypatch):
@@ -218,10 +262,13 @@ def test_header_is_one_line(token, monkeypatch):
 
 def test_header_never_breaks_the_tool(seeded_db, monkeypatch):
     """A failing health check (even an unexpected error) still returns the data."""
-    monkeypatch.setattr(status, "bridge_health", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(status, "bridge_health", boom)
     result = main.list_chats()
-    assert isinstance(result[0], str)
-    assert len(result) == 4
+    assert "unknown" in result["status"]
+    assert len(result["chats"]) == 3
 
 
 def test_tool_errors_still_raised():

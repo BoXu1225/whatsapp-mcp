@@ -66,9 +66,9 @@ def test_awaiting_reply_ignores_status_and_uses_contact_names(contacts_db):
 
 
 def test_awaiting_reply_tool(seeded_db):
-    header, *chats = main.list_awaiting_reply()
-    assert isinstance(header, str)  # freshness line (#7)
-    assert [c.jid for c in chats] == [BOB, ALICE]
+    result = main.list_awaiting_reply()
+    assert isinstance(result["status"], str)  # freshness line (#7)
+    assert [c.jid for c in result["chats"]] == [BOB, ALICE]
 
 
 def test_awaiting_reply_surfaces_errors():
