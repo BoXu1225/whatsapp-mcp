@@ -8,7 +8,7 @@ import status
 from contacts import Recipient
 from whatsapp import (
     WhatsAppDBError,
-    download_media as whatsapp_download_media,
+    download_media_result as whatsapp_download_media_result,
     get_chat as whatsapp_get_chat,
     get_contact_chats as whatsapp_get_contact_chats,
     get_direct_chat_by_contact as whatsapp_get_direct_chat_by_contact,
@@ -400,27 +400,22 @@ def send_audio_message(recipient: str, media_path: str, allow_unknown: bool = Fa
 @mcp.tool()
 def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
     """Download media from a WhatsApp message and get the local file path.
-    
+
+    Files are saved as <message ID>.<ext> in the chat's folder; original_filename
+    is the name the sender gave it (for documents). If the media has expired on
+    WhatsApp's servers, the bridge asks the sender's phone to upload it again and
+    this returns retry_requested=True: call download_media again in a little while.
+
     Args:
         message_id: The ID of the message containing the media
         chat_jid: The JID of the chat containing the message
-    
+
     Returns:
-        A dictionary containing success status, a status message, and the file path if successful
+        A dictionary with success, message, and file_path (plus original_filename)
+        on success, or retry_requested when a re-upload was requested
     """
-    file_path = whatsapp_download_media(message_id, chat_jid)
-    
-    if file_path:
-        return {
-            "success": True,
-            "message": "Media downloaded successfully",
-            "file_path": file_path
-        }
-    else:
-        return {
-            "success": False,
-            "message": "Failed to download media"
-        }
+    return whatsapp_download_media_result(message_id, chat_jid)
+
 
 if __name__ == "__main__":
     # Initialize and run the server
