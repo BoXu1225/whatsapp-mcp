@@ -59,7 +59,7 @@ func storeLiveMessage(messageStore *MessageStore, id Identity, msg *events.Messa
 			pn = id.Alt(chat)
 		}
 		if !pn.IsEmpty() {
-			if err := messageStore.MergeChat(pn.String(), chatJID); err != nil {
+			if err := messageStore.MergeChat(pn.String(), chatJID, id); err != nil {
 				return liveStored{}, fmt.Errorf("failed to merge chat %s into %s: %v", pn, chatJID, err)
 			}
 		}

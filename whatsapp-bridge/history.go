@@ -53,7 +53,7 @@ func storeHistorySync(messageStore *MessageStore, id Identity, historySync *even
 				}
 			}
 			if pn.Server == types.DefaultUserServer && pn.User != "" {
-				if err := messageStore.MergeChat(pn.String(), chatJID); err != nil {
+				if err := messageStore.MergeChat(pn.String(), chatJID, id); err != nil {
 					logger.Warnf("Failed to merge chat %s into %s: %v", pn, chatJID, err)
 				}
 			}
