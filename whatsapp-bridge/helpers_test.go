@@ -32,9 +32,9 @@ func TestExtractTextContent(t *testing.T) {
 			"plain",
 		},
 		{
-			"image caption is not extracted",
+			"image caption is the content",
 			&waProto.Message{ImageMessage: &waProto.ImageMessage{Caption: proto.String("a caption")}},
-			"",
+			"a caption",
 		},
 	}
 	for _, tt := range tests {
@@ -76,6 +76,11 @@ func TestExtractMediaInfo(t *testing.T) {
 			"document with filename",
 			&waProto.Message{DocumentMessage: &waProto.DocumentMessage{FileName: proto.String("report.pdf"), URL: proto.String("https://mmg.whatsapp.net/doc")}},
 			"document", "report.pdf", "https://mmg.whatsapp.net/doc", 0,
+		},
+		{
+			"sticker",
+			&waProto.Message{StickerMessage: &waProto.StickerMessage{URL: proto.String("https://mmg.whatsapp.net/st"), FileLength: proto.Uint64(7)}},
+			"sticker", "sticker_", "https://mmg.whatsapp.net/st", 7,
 		},
 		{
 			"document without filename",
