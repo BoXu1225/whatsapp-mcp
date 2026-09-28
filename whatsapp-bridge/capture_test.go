@@ -225,7 +225,7 @@ func columnNames(t *testing.T, db *sql.DB, table string) map[string]bool {
 func assertCaptureSchema(t *testing.T, db *sql.DB) {
 	t.Helper()
 	cols := columnNames(t, db, "messages")
-	for _, c := range []string{"reply_to", "edited_at", "is_deleted", "deleted_at"} {
+	for _, c := range []string{"reply_to", "edited_at", "is_deleted", "deleted_at", "deleted_by"} {
 		if !cols[c] {
 			t.Errorf("messages.%s missing", c)
 		}

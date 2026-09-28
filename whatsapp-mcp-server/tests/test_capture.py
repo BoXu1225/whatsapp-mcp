@@ -1,9 +1,10 @@
 """Replies, edits, deletes and reactions in tool output (#15, #16). All data is fake."""
 
+import sqlite3
 from datetime import datetime, timezone
 
 import pytest
-from conftest import ALICE, BOB, FakeMessagesDB
+from conftest import ALICE, BOB, CAPTURE_MIGRATION, FakeMessagesDB
 
 import whatsapp
 
@@ -100,3 +101,32 @@ def test_database_before_migration_5_still_works(tmp_path, monkeypatch):
     ctx = whatsapp.get_message_context("o1")
     assert ctx.message.reply_to is None and ctx.message.reactions == {}
     assert [c.jid for c in whatsapp.list_awaiting_reply()] == [ALICE]
+
+
+def test_capture_schema_check_is_cached(capture_db, monkeypatch):
+    calls = []
+    probe = whatsapp._probe_capture_schema
+
+    def counting(conn):
+        calls.append(1)
+        return probe(conn)
+
+    monkeypatch.setattr(whatsapp, "_probe_capture_schema", counting)
+    whatsapp._capture_schema_cache.clear()
+    whatsapp.list_messages(chat_jid=ALICE)
+    whatsapp.list_messages()  # with context: several neighbour queries
+    whatsapp.get_message_context("q2")
+    assert len(calls) == 1
+
+
+def test_capture_schema_found_after_bridge_migrates(tmp_path, monkeypatch):
+    """A missing schema isn't cached: once the bridge migrates, markers appear."""
+    db = FakeMessagesDB(tmp_path / "messages.db", pre_capture=True)
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", db.path)
+    db.add_chat(ALICE, "Alice Example", at(0))
+    db.add_message("o1", ALICE, ALICE, "before", at(0))
+    assert "[deleted]" not in whatsapp.list_messages(chat_jid=ALICE)
+    with sqlite3.connect(db.path) as conn:
+        conn.executescript(CAPTURE_MIGRATION)
+        conn.execute("UPDATE messages SET is_deleted = 1 WHERE id = 'o1'")
+    assert "[deleted] before" in whatsapp.list_messages(chat_jid=ALICE)

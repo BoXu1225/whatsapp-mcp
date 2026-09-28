@@ -54,11 +54,12 @@ PRE_CAPTURE_BRIDGE_SCHEMA = LEGACY_BRIDGE_SCHEMA + """
 """
 
 # Migration 5 (message capture, #15/#16): reply context, edits, deletes, reactions.
-BRIDGE_SCHEMA = PRE_CAPTURE_BRIDGE_SCHEMA + """
+CAPTURE_MIGRATION = """
     ALTER TABLE messages ADD COLUMN reply_to TEXT;
     ALTER TABLE messages ADD COLUMN edited_at TIMESTAMP;
     ALTER TABLE messages ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE messages ADD COLUMN deleted_at TIMESTAMP;
+    ALTER TABLE messages ADD COLUMN deleted_by TEXT;
     CREATE TABLE reactions (
         message_id TEXT NOT NULL,
         chat_jid TEXT NOT NULL,
@@ -68,6 +69,7 @@ BRIDGE_SCHEMA = PRE_CAPTURE_BRIDGE_SCHEMA + """
         PRIMARY KEY (message_id, chat_jid, sender)
     );
 """
+BRIDGE_SCHEMA = PRE_CAPTURE_BRIDGE_SCHEMA + CAPTURE_MIGRATION
 
 # From go.mau.fi/whatsmeow store/sqlstore/upgrades/00-latest-schema.sql. The
 # contacts foreign key to whatsmeow_device is left out; that table is not needed.
