@@ -87,9 +87,9 @@ func NewMessageStoreAt(dir string) (*MessageStore, error) {
 		db.Close()
 		return nil, err
 	}
-	// Before login the identity migrations (3, 4) can't run, so migration 5
-	// waits behind them; add its columns now so messages can be stored.
-	if err := store.ensureCaptureSchemaEarly(); err != nil {
+	// Before login the identity migrations (3, 4) can't run, so migrations
+	// 5 and 6 wait behind them; add their columns now so messages can be stored.
+	if err := store.ensureSchemaEarly(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to add message capture columns: %v", err)
 	}
@@ -197,6 +197,7 @@ type messageRow struct {
 	mediaKey, fileSHA256, fileEncSHA256     []byte
 	fileLength                              uint64
 	replyTo                                 string // ID of the quoted message, "" if none
+	directPath                              string // media path on WhatsApp's servers (#19), "" if none
 }
 
 // storeMessageRow inserts or updates a message. A message delivered again
@@ -211,8 +212,8 @@ func (store *MessageStore) storeMessageRow(m messageRow) error {
 
 	_, err := store.conn().Exec(
 		`INSERT INTO messages
-		(id, chat_jid, sender, sender_alt, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, reply_to)
-		VALUES (?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))
+		(id, chat_jid, sender, sender_alt, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, reply_to, direct_path)
+		VALUES (?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''))
 		ON CONFLICT(id, chat_jid) DO UPDATE SET
 			sender = CASE WHEN COALESCE(messages.sender, '') = '' THEN excluded.sender ELSE messages.sender END,
 			sender_alt = COALESCE(excluded.sender_alt, messages.sender_alt),
@@ -227,9 +228,10 @@ func (store *MessageStore) storeMessageRow(m messageRow) error {
 			file_sha256 = excluded.file_sha256,
 			file_enc_sha256 = excluded.file_enc_sha256,
 			file_length = excluded.file_length,
-			reply_to = COALESCE(excluded.reply_to, messages.reply_to)`,
+			reply_to = COALESCE(excluded.reply_to, messages.reply_to),
+			direct_path = COALESCE(excluded.direct_path, messages.direct_path)`,
 		m.id, m.chatJID, m.sender, m.senderAlt, m.content, m.timestamp.UTC(), m.isFromMe, m.mediaType, m.filename, m.url,
-		m.mediaKey, m.fileSHA256, m.fileEncSHA256, m.fileLength, m.replyTo,
+		m.mediaKey, m.fileSHA256, m.fileEncSHA256, m.fileLength, m.replyTo, m.directPath,
 	)
 	return err
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -104,57 +105,14 @@ type mediaRecord struct {
 }
 
 func (store *MessageStore) mediaRecord(id, chatJID string) (mediaRecord, error) {
-	// direct_path comes with migration 6, which can still be pending on a
-	// database that waits for its identity migrations (not logged in).
-	directPath := "''"
-	if ok, err := store.hasColumn("messages", "direct_path"); err != nil {
-		return mediaRecord{}, err
-	} else if ok {
-		directPath = "COALESCE(direct_path, '')"
-	}
 	var r mediaRecord
 	err := store.db.QueryRow(`SELECT COALESCE(media_type, ''), COALESCE(filename, ''), COALESCE(url, ''),
-		`+directPath+`, COALESCE(sender, ''), COALESCE(is_from_me, 0),
+		COALESCE(direct_path, ''), COALESCE(sender, ''), COALESCE(is_from_me, 0),
 		media_key, file_sha256, file_enc_sha256, COALESCE(file_length, 0)
 		FROM messages WHERE id = ? AND chat_jid = ?`, id, chatJID).Scan(
 		&r.mediaType, &r.filename, &r.url, &r.directPath, &r.sender, &r.isFromMe,
 		&r.mediaKey, &r.fileSHA256, &r.fileEncSHA256, &r.fileLength)
 	return r, err
-}
-
-func (store *MessageStore) hasColumn(table, column string) (bool, error) {
-	var n int
-	err := store.db.QueryRow("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?", table, column).Scan(&n)
-	return n > 0, err
-}
-
-// directPathRef identifies a stored media message by ID and URL.
-type directPathRef struct{ id, url, directPath string }
-
-// StoreDirectPaths records media direct paths. Rows are matched by message ID
-// and URL (as stored by extractMediaInfo); refs without a path are skipped.
-func (store *MessageStore) StoreDirectPaths(refs []directPathRef) error {
-	var todo []directPathRef
-	for _, r := range refs {
-		if r.id != "" && r.directPath != "" {
-			todo = append(todo, r)
-		}
-	}
-	if len(todo) == 0 {
-		return nil
-	}
-	tx, err := store.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, r := range todo {
-		if _, err := tx.Exec("UPDATE messages SET direct_path = ? WHERE id = ? AND COALESCE(url, '') = ? AND COALESCE(media_type, '') != ''",
-			r.directPath, r.id, r.url); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
 }
 
 func (store *MessageStore) setDirectPath(id, chatJID, directPath string) error {
@@ -163,8 +121,9 @@ func (store *MessageStore) setDirectPath(id, chatJID, directPath string) error {
 }
 
 // mediaDirectPath returns the URL and direct path of the media in msg (the
-// media kinds extractMediaInfo stores), or "" for both.
+// media kinds extractMediaInfo stores, in the same order), or "" for both.
 func mediaDirectPath(msg *waProto.Message) (url, directPath string) {
+	msg = unwrapMessage(msg)
 	if msg == nil {
 		return "", ""
 	}
@@ -174,20 +133,28 @@ func mediaDirectPath(msg *waProto.Message) (url, directPath string) {
 	if m := msg.GetVideoMessage(); m != nil {
 		return m.GetURL(), m.GetDirectPath()
 	}
+	if m := msg.GetPtvMessage(); m != nil {
+		return m.GetURL(), m.GetDirectPath()
+	}
 	if m := msg.GetAudioMessage(); m != nil {
 		return m.GetURL(), m.GetDirectPath()
 	}
 	if m := msg.GetDocumentMessage(); m != nil {
 		return m.GetURL(), m.GetDirectPath()
 	}
+	if m := msg.GetStickerMessage(); m != nil {
+		return m.GetURL(), m.GetDirectPath()
+	}
 	return "", ""
 }
 
-var defaultMediaExt = map[string]string{"image": ".jpg", "video": ".mp4", "audio": ".ogg"}
+var defaultMediaExt = map[string]string{"image": ".jpg", "video": ".mp4", "audio": ".ogg", "sticker": ".webp"}
 
 // mediaFileName is the local file name for a message's media:
 // <message ID>.<ext>. Characters other than letters, digits, - and _ in the
-// ID become "_". The extension comes from the stored file name when it is
+// ID become "_", and then a short hash of the original ID is appended
+// ("<ID>-<hash>.<ext>") so two IDs that sanitise alike ("A!", "A_") never
+// share a file. The extension comes from the stored file name when it is
 // short and alphanumeric, else from the media type (none for documents).
 func mediaFileName(messageID, originalName, mediaType string) (string, error) {
 	switch messageID {
@@ -202,6 +169,10 @@ func mediaFileName(messageID, originalName, mediaType string) (string, error) {
 	}, messageID)
 	if len(id) > 128 {
 		id = id[:128]
+	}
+	if id != messageID {
+		sum := sha256.Sum256([]byte(messageID))
+		id += "-" + hex.EncodeToString(sum[:4])
 	}
 	ext := ""
 	if safe, ok := safeMediaFilename(originalName); ok {
@@ -304,7 +275,7 @@ func (m *mediaService) download(messageID, chatJID string) (mediaResult, error) 
 	}
 	var waMediaType whatsmeow.MediaType
 	switch rec.mediaType {
-	case "image":
+	case "image", "sticker":
 		waMediaType = whatsmeow.MediaImage
 	case "video":
 		waMediaType = whatsmeow.MediaVideo

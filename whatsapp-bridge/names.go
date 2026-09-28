@@ -164,23 +164,26 @@ const groupNameRetryAfter = time.Hour
 
 // groupNameCache remembers group names from GetGroupInfo, so the event
 // handler asks the server about a group at most once per run (and once per
-// groupNameRetryAfter after a failure) instead of for every message.
+// groupNameRetryAfter after a failure) instead of for every message. The
+// lock is not held during the network call; concurrent lookups of the same
+// group share one call.
 type groupNameCache struct {
 	mu      sync.Mutex
-	entries map[types.JID]groupNameEntry
+	entries map[types.JID]*groupNameEntry
 	fetch   func(client *whatsmeow.Client, jid types.JID) (string, error)
 	now     func() time.Time
 }
 
 type groupNameEntry struct {
-	name string // "" if the lookup failed
+	done chan struct{} // closed when the lookup finished
+	name string        // "" if the lookup failed
 	at   time.Time
 }
 
 var groupNames = newGroupNameCache()
 
 func newGroupNameCache() *groupNameCache {
-	return &groupNameCache{entries: map[types.JID]groupNameEntry{}, fetch: fetchGroupName, now: time.Now}
+	return &groupNameCache{entries: map[types.JID]*groupNameEntry{}, fetch: fetchGroupName, now: time.Now}
 }
 
 func fetchGroupName(client *whatsmeow.Client, jid types.JID) (string, error) {
@@ -196,14 +199,32 @@ func fetchGroupName(client *whatsmeow.Client, jid types.JID) (string, error) {
 // lookup returns the group's name, if known or fetchable.
 func (c *groupNameCache) lookup(client *whatsmeow.Client, jid types.JID) (string, bool) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if e, ok := c.entries[jid]; ok && (e.name != "" || c.now().Sub(e.at) < groupNameRetryAfter) {
-		return e.name, e.name != ""
+	if e, ok := c.entries[jid]; ok {
+		select {
+		case <-e.done:
+			if e.name != "" || c.now().Sub(e.at) < groupNameRetryAfter {
+				c.mu.Unlock()
+				return e.name, e.name != ""
+			}
+		default:
+			// Another goroutine is fetching it: wait for that call.
+			c.mu.Unlock()
+			<-e.done
+			return e.name, e.name != ""
+		}
 	}
+	// Not cached, or failed long enough ago: ask the server.
+	e := &groupNameEntry{done: make(chan struct{})}
+	c.entries[jid] = e
+	c.mu.Unlock()
+
 	name, err := c.fetch(client, jid)
 	if err != nil {
 		name = ""
 	}
-	c.entries[jid] = groupNameEntry{name: name, at: c.now()}
+	c.mu.Lock()
+	e.name, e.at = name, c.now()
+	c.mu.Unlock()
+	close(e.done)
 	return name, name != ""
 }

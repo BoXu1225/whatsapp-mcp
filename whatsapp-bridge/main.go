@@ -167,17 +167,12 @@ func (b *bridgeEvents) handle(evt any) bool {
 			return true
 		}
 		<-b.ready
-		if !handleMessage(b.client, b.store, v, b.logger) {
-			return false
-		}
-		url, dp := mediaDirectPath(v.Message)
-		b.storeDirectPaths([]directPathRef{{id: v.Info.ID, url: url, directPath: dp}})
+		return handleMessage(b.client, b.store, v, b.logger)
 
 	case *events.HistorySync:
 		<-b.ready
 		dropStatusConversations(v)
 		handleHistorySync(b.client, b.store, v, b.logger)
-		b.storeDirectPaths(historyDirectPaths(v))
 
 	case *events.MediaRetry:
 		if b.media != nil {
@@ -203,14 +198,6 @@ func (b *bridgeEvents) handle(evt any) bool {
 	return true
 }
 
-// storeDirectPaths records media direct paths. A failure only costs the
-// URL-derived fallback at download time, so it is logged, not reported.
-func (b *bridgeEvents) storeDirectPaths(refs []directPathRef) {
-	if err := b.store.StoreDirectPaths(refs); err != nil {
-		b.logger.Warnf("Failed to store media direct paths: %v", err)
-	}
-}
-
 // dropStatusConversations removes status updates from a history sync, so no
 // name lookup or store work is spent on them (#21).
 func dropStatusConversations(evt *events.HistorySync) {
@@ -224,20 +211,6 @@ func dropStatusConversations(evt *events.HistorySync) {
 		}
 	}
 	evt.Data.Conversations = kept
-}
-
-// historyDirectPaths lists the media direct paths in a history sync.
-func historyDirectPaths(evt *events.HistorySync) []directPathRef {
-	var refs []directPathRef
-	for _, conv := range evt.Data.GetConversations() {
-		for _, m := range conv.GetMessages() {
-			web := m.GetMessage()
-			if url, dp := mediaDirectPath(web.GetMessage()); dp != "" {
-				refs = append(refs, directPathRef{id: web.GetKey().GetID(), url: url, directPath: dp})
-			}
-		}
-	}
-	return refs
 }
 
 // configureClient sets the whatsmeow options the bridge relies on.
@@ -325,7 +298,7 @@ func run() int {
 			logger.Errorf("Failed to migrate message store: %v", err)
 			return 1
 		}
-	} else if pending, err := messageStore.PendingIdentityMigrations(); err == nil && pending {
+	} else if pending, err := messageStore.PendingMigrations(); err == nil && pending {
 		logger.Infof("Not logged in yet: the remaining migrations run right after pairing")
 	}
 
