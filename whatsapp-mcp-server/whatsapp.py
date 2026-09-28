@@ -350,8 +350,8 @@ def list_messages(
             where_clauses.append("m.chat_jid = ?")
             params.append(chat_jid)
         if query:
-            where_clauses.append("LOWER(m.content) LIKE LOWER(?)")
-            params.append(f"%{query}%")
+            where_clauses.append("LOWER(m.content) LIKE LOWER(?) ESCAPE '\\'")
+            params.append(f"%{_escape_like(query)}%")
         if media_type:
             where_clauses.append("LOWER(m.media_type) = LOWER(?)")
             params.append(media_type)
@@ -405,6 +405,11 @@ def get_message_context(
         )
 
 
+def _escape_like(text: str) -> str:
+    """Escape LIKE wildcards so user input matches literally (use with ESCAPE '\\')."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def list_chats(
     query: Optional[str] = None,
     limit: int = 20,
@@ -421,8 +426,9 @@ def list_chats(
         directory = load_directory(conn)
         where, params = "", ()
         if query:
-            where = "WHERE (LOWER(name) LIKE LOWER(?) OR jid LIKE ?)"
-            params = (f"%{query}%", f"%{query}%")
+            pattern = f"%{_escape_like(query)}%"
+            where = "WHERE (LOWER(name) LIKE LOWER(?) ESCAPE '\\' OR jid LIKE ? ESCAPE '\\')"
+            params = (pattern, pattern)
         order = "last_message_time DESC" if sort_by == "last_active" else "name"
         return _fetch_chats(
             conn, directory, where, params, order=order, limit=limit, offset=page * limit,
