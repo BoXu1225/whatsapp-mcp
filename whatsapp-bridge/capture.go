@@ -89,6 +89,7 @@ func processMessage(store *MessageStore, evt *events.Message, t captureTarget) (
 
 	out.content = extractTextContent(msg)
 	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg)
+	_, directPath := mediaDirectPath(msg)
 	out.mediaType, out.filename = mediaType, filename
 	if out.content == "" && mediaType == "" {
 		return out, nil
@@ -105,7 +106,7 @@ func processMessage(store *MessageStore, evt *events.Message, t captureTarget) (
 		id: info.ID, chatJID: chatJID, sender: t.sender, senderAlt: t.senderAlt, content: out.content,
 		timestamp: info.Timestamp, isFromMe: info.IsFromMe, mediaType: mediaType, filename: filename, url: url,
 		mediaKey: mediaKey, fileSHA256: fileSHA256, fileEncSHA256: fileEncSHA256, fileLength: fileLength,
-		replyTo: extractReplyTo(msg),
+		replyTo: extractReplyTo(msg), directPath: directPath,
 	})
 	out.stored = err == nil
 	return out, err

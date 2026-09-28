@@ -111,10 +111,6 @@ func (store *MessageStore) migrate(id *Identity) (migrationReport, error) {
 	if err != nil {
 		return rep, fmt.Errorf("failed to read schema version: %v", err)
 	}
-	current, err := store.schemaVersion()
-	if err != nil {
-		return rep, fmt.Errorf("failed to read schema version: %v", err)
-	}
 	var pending []migration
 	for _, m := range migrations {
 		if applied[m.version] {
@@ -133,6 +129,10 @@ func (store *MessageStore) migrate(id *Identity) (migrationReport, error) {
 	if err != nil {
 		return rep, fmt.Errorf("failed to inspect database before migrating: %v", err)
 	}
+	// The backup is named after the version the database is at before this
+	// run: the one below the first pending migration (a gap being filled
+	// may sit below the highest applied one).
+	current := pending[0].version - 1
 	if store.backupPath == "" {
 		if hasData {
 			path, err := store.backup(current)
@@ -182,8 +182,9 @@ func (store *MessageStore) MigrateIdentity(id Identity) (migrationReport, error)
 	return store.migrate(&id)
 }
 
-// PendingIdentityMigrations reports whether MigrateIdentity has work to do.
-func (store *MessageStore) PendingIdentityMigrations() (bool, error) {
+// PendingMigrations reports whether any migration is not applied yet (after
+// NewMessageStoreAt that means ones waiting for MigrateIdentity).
+func (store *MessageStore) PendingMigrations() (bool, error) {
 	applied, err := store.appliedMigrations()
 	if err != nil {
 		return false, err
@@ -626,17 +627,17 @@ func addCaptureSchema(tx *sql.Tx) error {
 	return err
 }
 
-// ensureCaptureSchemaEarly adds migration 5's columns and table without
-// recording the migration, when migration 5 is still pending (it waits
-// behind the identity migrations until after login). The changes only add
+// ensureSchemaEarly adds migration 5's and 6's columns and table without
+// recording the migrations, when they are not recorded yet (they wait behind
+// the identity migrations until after login). The changes only add
 // nullable/defaulted columns and a new table, so no backup is made; the
-// migration itself later finds them in place.
-func (store *MessageStore) ensureCaptureSchemaEarly() error {
-	current, err := store.schemaVersion()
+// migrations themselves later find them in place.
+func (store *MessageStore) ensureSchemaEarly() error {
+	applied, err := store.appliedMigrations()
 	if err != nil {
 		return err
 	}
-	if current >= 5 {
+	if applied[5] && applied[6] {
 		return nil
 	}
 	tx, err := store.db.Begin()
@@ -644,8 +645,15 @@ func (store *MessageStore) ensureCaptureSchemaEarly() error {
 		return err
 	}
 	defer tx.Rollback()
-	if err := addCaptureSchema(tx); err != nil {
-		return err
+	if !applied[5] {
+		if err := addCaptureSchema(tx); err != nil {
+			return err
+		}
+	}
+	if !applied[6] {
+		if err := addDirectPathColumn(tx); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -656,18 +664,24 @@ func (store *MessageStore) ensureCaptureSchemaEarly() error {
 // media servers, used for downloads instead of parsing the URL) and removes
 // status updates older versions stored as a status@broadcast chat.
 func migrateDirectPath(tx *sql.Tx, _ *Identity, _ *migrationReport) error {
-	var n int
-	if err := tx.QueryRow("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'direct_path'").Scan(&n); err != nil {
+	if err := addDirectPathColumn(tx); err != nil {
 		return err
-	}
-	if n == 0 {
-		if _, err := tx.Exec("ALTER TABLE messages ADD COLUMN direct_path TEXT"); err != nil {
-			return err
-		}
 	}
 	if _, err := tx.Exec("DELETE FROM messages WHERE chat_jid = ?", statusBroadcastJID); err != nil {
 		return err
 	}
 	_, err := tx.Exec("DELETE FROM chats WHERE jid = ?", statusBroadcastJID)
+	return err
+}
+
+func addDirectPathColumn(tx *sql.Tx) error {
+	var n int
+	if err := tx.QueryRow("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'direct_path'").Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	_, err := tx.Exec("ALTER TABLE messages ADD COLUMN direct_path TEXT")
 	return err
 }
