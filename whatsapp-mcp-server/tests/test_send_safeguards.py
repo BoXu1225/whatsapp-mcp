@@ -135,3 +135,12 @@ def test_bare_number_that_is_both_phone_and_lid_is_ambiguous(contacts_db, whatsm
     # The full JID is unambiguous.
     assert main.send_message("15550000007@lid", "hi")["recipient_name"] == "Hank Example"
     assert main.send_message("15550000007@s.whatsapp.net", "hi")["recipient_name"] == "Gina Example"
+
+
+def test_phone_of_lid_keyed_contact_goes_to_existing_chat(contacts_db, sent):
+    from conftest import CAROL_PN
+
+    for recipient in (CAROL_PN, "+1 555 000 0003", CAROL_PN + "@s.whatsapp.net"):
+        result = main.send_message(recipient, "hi")
+        assert result["recipient_jid"] == CAROL_LID_JID, recipient
+    assert [r for _, r, _ in sent] == [CAROL_LID_JID] * 3
