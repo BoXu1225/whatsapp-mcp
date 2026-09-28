@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -206,8 +207,15 @@ func main() {
 		logger.Errorf("Failed to set up API token: %v", err)
 		return
 	}
+	allowedDirs, err := sendAllowedDirs("store")
+	if err != nil {
+		logger.Errorf("Failed to set up outbox: %v", err)
+		return
+	}
+	logger.Infof("Files can be sent from: %s", strings.Join(allowedDirs, ", "))
 	api := newAPIServer(client, messageStore)
 	api.token = token
+	api.allowedDirs = allowedDirs
 	if err := startRESTServer(api, 8080); err != nil {
 		logger.Errorf("Failed to start REST API server: %v", err)
 		return

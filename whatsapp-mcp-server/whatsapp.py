@@ -46,6 +46,37 @@ def _bridge_headers() -> dict:
     return {BRIDGE_TOKEN_HEADER: token}
 
 
+# Files can only be sent from the bridge's outbox (<store>/outbox) and any extra
+# directories in this env var. The bridge enforces the same rule; checking here
+# too gives a clear error before any request.
+SEND_ALLOWED_DIRS_ENV = "WHATSAPP_SEND_ALLOWED_DIRS"
+
+
+def _outbox_dir() -> str:
+    return os.path.join(_bridge_store_dir(), "outbox")
+
+
+def _send_allowed_dirs() -> List[str]:
+    """Outbox plus WHATSAPP_SEND_ALLOWED_DIRS entries, absolute with symlinks resolved."""
+    dirs = [_outbox_dir()] + [d for d in os.environ.get(SEND_ALLOWED_DIRS_ENV, "").split(os.pathsep) if d.strip()]
+    return [os.path.realpath(d) for d in dirs]
+
+
+def _resolve_send_path(media_path: str) -> Tuple[Optional[str], Optional[str]]:
+    """Return (resolved_path, None) if media_path is a file inside an allowed
+    directory after resolving '..' and symlinks, else (None, error message)."""
+    real = os.path.realpath(media_path)
+    if not os.path.isfile(real):
+        return None, f"Media file not found: {media_path}"
+    for d in _send_allowed_dirs():
+        if real.startswith(d.rstrip(os.sep) + os.sep):
+            return real, None
+    return None, (
+        f"Refusing to send {media_path}: files can only be sent from the outbox ({_outbox_dir()})"
+        f" or directories listed in {SEND_ALLOWED_DIRS_ENV}. Copy the file into the outbox first."
+    )
+
+
 def _bridge_post(endpoint: str, payload: dict) -> requests.Response:
     """POST JSON to the bridge API with the token header and a timeout."""
     return requests.post(f"{WHATSAPP_API_BASE_URL}/{endpoint}", json=payload, headers=_bridge_headers(), timeout=BRIDGE_TIMEOUT)
@@ -701,9 +732,10 @@ def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
         if not media_path:
             return False, "Media path must be provided"
         
-        if not os.path.isfile(media_path):
-            return False, f"Media file not found: {media_path}"
-        
+        media_path, error = _resolve_send_path(media_path)
+        if error:
+            return False, error
+
         payload = {
             "recipient": recipient,
             "media_path": media_path
@@ -728,37 +760,45 @@ def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
         return False, f"Unexpected error: {str(e)}"
 
 def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
+    converted = None
     try:
         # Validate input
         if not recipient:
             return False, "Recipient must be provided"
-        
+
         if not media_path:
             return False, "Media path must be provided"
-        
-        if not os.path.isfile(media_path):
-            return False, f"Media file not found: {media_path}"
 
-        if not media_path.endswith(".ogg"):
+        media_path, error = _resolve_send_path(media_path)
+        if error:
+            return False, error
+
+        if not media_path.lower().endswith(".ogg"):
+            # Write the converted file into the outbox so the bridge will send it.
+            outbox = _outbox_dir()
+            os.makedirs(outbox, mode=0o700, exist_ok=True)
             try:
-                media_path = audio.convert_to_opus_ogg_temp(media_path)
+                converted = audio.convert_to_opus_ogg_temp(media_path, output_dir=os.path.realpath(outbox))
             except Exception as e:
                 return False, f"Error converting file to opus ogg. You likely need to install ffmpeg: {str(e)}"
-        
+            media_path, error = _resolve_send_path(converted)
+            if error:
+                return False, error
+
         payload = {
             "recipient": recipient,
             "media_path": media_path
         }
 
         response = _bridge_post("send", payload)
-        
+
         # Check if the request was successful
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "Unknown response")
         else:
             return False, f"Error: HTTP {response.status_code} - {response.text}"
-            
+
     except BridgeTokenError as e:
         return False, str(e)
     except requests.RequestException as e:
@@ -767,6 +807,10 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
         return False, f"Error parsing response: {response.text}"
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
+    finally:
+        # The bridge has read the file by the time it replies.
+        if converted and os.path.exists(converted):
+            os.unlink(converted)
 
 def download_media(message_id: str, chat_jid: str) -> Optional[str]:
     """Download media from a message and return the local file path.
