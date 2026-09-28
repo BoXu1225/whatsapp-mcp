@@ -18,6 +18,7 @@ from whatsapp import (
     list_chats as whatsapp_list_chats,
     list_messages as whatsapp_list_messages,
     load_directory,
+    request_history as whatsapp_request_history,
     search_contacts_counted as whatsapp_search_contacts_counted,
     send_audio_message as whatsapp_audio_voice_message,
     send_file as whatsapp_send_file,
@@ -415,6 +416,31 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
         on success, or retry_requested when a re-upload was requested
     """
     return whatsapp_download_media_result(message_id, chat_jid)
+
+
+@mcp.tool()
+def request_history(chat_jid: str, count: int = 50) -> Dict[str, Any]:
+    """Ask your phone for older messages of a chat than the bridge has stored.
+
+    The request starts at the oldest stored message in the chat and asks for up
+    to `count` (1-50) messages before it. Results arrive asynchronously: the phone
+    must be online, and the messages are stored as they come in (usually within a
+    minute). Call list_messages for the chat afterwards; repeat to go further back.
+
+    Args:
+        chat_jid: The chat's JID (e.g. 123456789@s.whatsapp.net, ...@lid or ...@g.us)
+        count: How many older messages to ask for, 1-50 (default 50)
+
+    Returns:
+        A dictionary with success, message and, when sent, request_id and the
+        oldest_message_id the request is anchored at
+    """
+    result = whatsapp_request_history(chat_jid, count)
+    if result.get("success"):
+        result["message"] = (
+            f"{result['message']} This is asynchronous: check list_messages for this chat again shortly."
+        )
+    return result
 
 
 if __name__ == "__main__":
