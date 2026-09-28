@@ -42,6 +42,13 @@ which this fork started from.
 
 ### Changed
 
+- The MCP server uses the MCP Python SDK 2.x (`mcp[cli]>=2.2.0`, was 1.x) and
+  `requests>=2.34.2` (#36). Tool names, parameters, descriptions and output
+  are unchanged: results are still plain text content (no `outputSchema` or
+  `structuredContent`), JSON as before, and errors still carry their message.
+  An end-to-end test checks this through an MCP client session against a
+  snapshot. The server now reports an empty `serverInfo.version` (1.x sent
+  the SDK's version).
 - `messages.db` is opened with `_journal_mode=WAL&_busy_timeout=5000`. The
   message handler is registered with `AddEventHandlerWithSuccessStatus` and
   returns false when a message fails to store, so it is not acknowledged; with
@@ -130,6 +137,8 @@ but its columns are added at start anyway so messages can be stored.
 
 ### Upgrade notes
 
+- The MCP server needs the new dependencies: `uv run` installs them on the
+  next start (network access needed once). The client config is unchanged.
 - Rebuild and restart the bridge, then restart the MCP server. The first start
   writes `store/messages.db.bak-0-<timestamp>`; delete it when you're satisfied.
 - Until the bridge has migrated, time filters on old rows may be off by the
