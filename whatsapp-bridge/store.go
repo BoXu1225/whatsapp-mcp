@@ -84,6 +84,12 @@ func NewMessageStoreAt(dir string) (*MessageStore, error) {
 		db.Close()
 		return nil, err
 	}
+	// Before login the identity migrations (3, 4) can't run, so migration 5
+	// waits behind them; add its columns now so messages can be stored.
+	if err := store.ensureCaptureSchemaEarly(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to add message capture columns: %v", err)
+	}
 	return store, nil
 }
 
@@ -158,17 +164,75 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 // stored in UTC.
 func (store *MessageStore) StoreMessageWithAlt(id, chatJID, sender, senderAlt, content string, timestamp time.Time, isFromMe bool,
 	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
+	return store.storeMessageRow(messageRow{
+		id: id, chatJID: chatJID, sender: sender, senderAlt: senderAlt, content: content,
+		timestamp: timestamp, isFromMe: isFromMe, mediaType: mediaType, filename: filename, url: url,
+		mediaKey: mediaKey, fileSHA256: fileSHA256, fileEncSHA256: fileEncSHA256, fileLength: fileLength,
+	})
+}
+
+// messageRow is a row of the messages table, as stored by storeMessageRow.
+type messageRow struct {
+	id, chatJID, sender, senderAlt, content string
+	timestamp                               time.Time
+	isFromMe                                bool
+	mediaType, filename, url                string
+	mediaKey, fileSHA256, fileEncSHA256     []byte
+	fileLength                              uint64
+	replyTo                                 string // ID of the quoted message, "" if none
+}
+
+// storeMessageRow inserts or updates a message. A message delivered again
+// (history re-sync) is updated, but an edited or deleted message keeps its
+// stored content, edited_at and deletion mark (#16), and an unknown
+// sender_alt or reply_to doesn't erase a known one.
+func (store *MessageStore) storeMessageRow(m messageRow) error {
 	// Only store if there's actual content or media
-	if content == "" && mediaType == "" {
+	if m.content == "" && m.mediaType == "" {
 		return nil
 	}
 
 	_, err := store.conn().Exec(
-		`INSERT OR REPLACE INTO messages
-		(id, chat_jid, sender, sender_alt, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length)
-		VALUES (?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, chatJID, sender, senderAlt, content, timestamp.UTC(), isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
+		`INSERT INTO messages
+		(id, chat_jid, sender, sender_alt, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, reply_to)
+		VALUES (?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))
+		ON CONFLICT(id, chat_jid) DO UPDATE SET
+			sender = excluded.sender,
+			sender_alt = COALESCE(excluded.sender_alt, messages.sender_alt),
+			content = CASE WHEN messages.edited_at IS NOT NULL OR COALESCE(messages.is_deleted, 0) != 0
+				THEN messages.content ELSE excluded.content END,
+			timestamp = excluded.timestamp,
+			is_from_me = excluded.is_from_me,
+			media_type = excluded.media_type,
+			filename = excluded.filename,
+			url = excluded.url,
+			media_key = excluded.media_key,
+			file_sha256 = excluded.file_sha256,
+			file_enc_sha256 = excluded.file_enc_sha256,
+			file_length = excluded.file_length,
+			reply_to = COALESCE(excluded.reply_to, messages.reply_to)`,
+		m.id, m.chatJID, m.sender, m.senderAlt, m.content, m.timestamp.UTC(), m.isFromMe, m.mediaType, m.filename, m.url,
+		m.mediaKey, m.fileSHA256, m.fileEncSHA256, m.fileLength, m.replyTo,
 	)
+	return err
+}
+
+// StoreReaction records sender's reaction to message targetID in chatJID
+// (#15): one per sender and message, the newest wins. An empty emoji removes
+// the reaction. A reaction older than the stored one is ignored.
+func (store *MessageStore) StoreReaction(chatJID, targetID, sender, emoji string, at time.Time) error {
+	at = at.UTC()
+	if emoji == "" {
+		_, err := store.conn().Exec(
+			"DELETE FROM reactions WHERE message_id = ? AND chat_jid = ? AND sender = ? AND (timestamp IS NULL OR timestamp <= ?)",
+			targetID, chatJID, sender, at)
+		return err
+	}
+	_, err := store.conn().Exec(
+		`INSERT INTO reactions (message_id, chat_jid, sender, emoji, timestamp) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(message_id, chat_jid, sender) DO UPDATE SET emoji = excluded.emoji, timestamp = excluded.timestamp
+		WHERE reactions.timestamp IS NULL OR excluded.timestamp >= reactions.timestamp`,
+		targetID, chatJID, sender, emoji, at)
 	return err
 }
 

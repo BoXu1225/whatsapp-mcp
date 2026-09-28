@@ -33,6 +33,7 @@ func clientChatNamer(client *whatsmeow.Client, messageStore *MessageStore, logge
 // liveStored describes a stored live message, for logging.
 type liveStored struct {
 	kind                       string // see processed
+	target                     string // message a reaction, edit or revoke applies to
 	stored                     bool
 	chatJID, sender            string
 	content, mediaType, fileNm string
@@ -74,7 +75,7 @@ func storeLiveMessage(messageStore *MessageStore, id Identity, msg *events.Messa
 		sender:    sender,
 		senderAlt: senderAlt,
 	})
-	out.kind, out.stored = res.kind, res.stored
+	out.kind, out.stored, out.target = res.kind, res.stored, res.targetID
 	out.content, out.mediaType, out.fileNm = res.content, res.mediaType, res.filename
 	return out, err
 }
@@ -99,7 +100,10 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		}
 
 		// Content, filenames and names only with -debug
-		if debugLogging {
+		if res.kind != "message" {
+			// Reactions, edits, deletes: IDs only.
+			fmt.Printf("[%s] %s %s in %s: id=%s %s of %s\n", timestamp, direction, sender, chatJID, msg.Info.ID, res.kind, res.target)
+		} else if debugLogging {
 			if mediaType != "" {
 				fmt.Printf("[%s] %s %s: [%s: %s] %s\n", timestamp, direction, sender, mediaType, filename, content)
 			} else if content != "" {
