@@ -911,6 +911,42 @@ def download_media_result(message_id: str, chat_jid: str) -> dict:
     return {"success": False, "message": message}
 
 
+HISTORY_MAX_COUNT = 50
+
+
+def request_history(chat_jid: str, count: int = HISTORY_MAX_COUNT) -> dict:
+    """Ask the bridge to request older messages of a chat from the phone (#20).
+
+    The bridge anchors the request at the oldest stored message of the chat.
+    Returns {"success", "message"} plus "request_id", "oldest_message_id" and
+    "count" when the request was sent. The messages arrive asynchronously.
+    """
+    if not chat_jid:
+        return {"success": False, "message": "chat_jid is required"}
+    if not isinstance(count, int) or count < 1 or count > HISTORY_MAX_COUNT:
+        return {"success": False, "message": f"count must be between 1 and {HISTORY_MAX_COUNT}"}
+    try:
+        response = _bridge_post("history", {"chat_jid": chat_jid, "count": count})
+    except BridgeTokenError as e:
+        print(str(e), file=sys.stderr)
+        return {"success": False, "message": str(e)}
+    except requests.RequestException as e:
+        print(f"Request error: {str(e)}", file=sys.stderr)
+        return {"success": False, "message": f"Could not reach the WhatsApp bridge: {e}"}
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        return {"success": False, "message": f"Bridge returned HTTP {response.status_code}: {response.text}"}
+    result = {"success": bool(body.get("success")) and response.status_code == 202,
+              "message": body.get("message") or f"HTTP {response.status_code}"}
+    for key in ("request_id", "oldest_message_id", "count"):
+        if key in body:
+            result[key] = body[key]
+    return result
+
+
 def download_media(message_id: str, chat_jid: str) -> Optional[str]:
     """Download media from a message and return the local file path, or None.
 

@@ -68,12 +68,15 @@ type apiServer struct {
 
 	media *mediaService // downloads and media retries
 
-	sendPeer func(ctx context.Context, msg *waE2E.Message) (string, error) // TODO(#20) stub
+	// sendPeer sends a message to our own phone (history requests); defaults
+	// to client.SendPeerMessage.
+	sendPeer func(ctx context.Context, msg *waE2E.Message) (string, error)
 }
 
 func newAPIServer(client *whatsmeow.Client, messageStore *MessageStore) *apiServer {
 	s := &apiServer{client: client, store: messageStore, health: newBridgeHealth(time.Now())}
 	s.media = newMediaService(clientFetcher(client), messageStore)
+	s.sendPeer = clientPeerSender(s)
 	s.send = func(recipient, message, mediaPath string, mediaData []byte) (bool, string) {
 		return sendWhatsAppMessage(s.client, recipient, message, mediaPath, mediaData)
 	}
@@ -88,6 +91,7 @@ func (s *apiServer) handler() http.Handler {
 	mux.HandleFunc("/api/send", s.handleSend)
 	mux.HandleFunc("/api/download", s.handleDownload)
 	mux.HandleFunc("/api/health", s.handleHealth)
+	mux.HandleFunc("/api/history", s.handleHistory)
 	return s.guard(mux)
 }
 
