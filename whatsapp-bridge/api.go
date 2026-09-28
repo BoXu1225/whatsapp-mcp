@@ -35,104 +35,130 @@ type DownloadMediaResponse struct {
 	Path     string `json:"path,omitempty"`
 }
 
+// apiServer holds what the REST handlers need. send defaults to
+// sendWhatsAppMessage on client; tests replace it with a stub.
+type apiServer struct {
+	client *whatsmeow.Client
+	store  *MessageStore
+	send   func(recipient, message, mediaPath string) (bool, string)
+}
+
+func newAPIServer(client *whatsmeow.Client, messageStore *MessageStore) *apiServer {
+	s := &apiServer{client: client, store: messageStore}
+	s.send = func(recipient, message, mediaPath string) (bool, string) {
+		return sendWhatsAppMessage(s.client, recipient, message, mediaPath)
+	}
+	return s
+}
+
+// handler returns the REST API on its own mux.
+func (s *apiServer) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/send", s.handleSend)
+	mux.HandleFunc("/api/download", s.handleDownload)
+	return mux
+}
+
+// Handler for sending messages
+func (s *apiServer) handleSend(w http.ResponseWriter, r *http.Request) {
+	// Only allow POST requests
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse the request body
+	var req SendMessageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+
+	// Validate request
+	if req.Recipient == "" {
+		http.Error(w, "Recipient is required", http.StatusBadRequest)
+		return
+	}
+
+	if req.Message == "" && req.MediaPath == "" {
+		http.Error(w, "Message or media path is required", http.StatusBadRequest)
+		return
+	}
+
+	fmt.Println("Received request to send message", req.Message, req.MediaPath)
+
+	// Send the message
+	success, message := s.send(req.Recipient, req.Message, req.MediaPath)
+	fmt.Println("Message sent", success, message)
+	// Set response headers
+	w.Header().Set("Content-Type", "application/json")
+
+	// Set appropriate status code
+	if !success {
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+
+	// Send response
+	json.NewEncoder(w).Encode(SendMessageResponse{
+		Success: success,
+		Message: message,
+	})
+}
+
+// Handler for downloading media
+func (s *apiServer) handleDownload(w http.ResponseWriter, r *http.Request) {
+	// Only allow POST requests
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse the request body
+	var req DownloadMediaRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+
+	// Validate request
+	if req.MessageID == "" || req.ChatJID == "" {
+		http.Error(w, "Message ID and Chat JID are required", http.StatusBadRequest)
+		return
+	}
+
+	// Download the media
+	success, mediaType, filename, path, err := downloadMedia(s.client, s.store, req.MessageID, req.ChatJID)
+
+	// Set response headers
+	w.Header().Set("Content-Type", "application/json")
+
+	// Handle download result
+	if !success || err != nil {
+		errMsg := "Unknown error"
+		if err != nil {
+			errMsg = err.Error()
+		}
+
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(DownloadMediaResponse{
+			Success: false,
+			Message: fmt.Sprintf("Failed to download media: %s", errMsg),
+		})
+		return
+	}
+
+	// Send successful response
+	json.NewEncoder(w).Encode(DownloadMediaResponse{
+		Success:  true,
+		Message:  fmt.Sprintf("Successfully downloaded %s media", mediaType),
+		Filename: filename,
+		Path:     path,
+	})
+}
+
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
-	// Handler for sending messages
-	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
-		// Only allow POST requests
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		// Parse the request body
-		var req SendMessageRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request format", http.StatusBadRequest)
-			return
-		}
-
-		// Validate request
-		if req.Recipient == "" {
-			http.Error(w, "Recipient is required", http.StatusBadRequest)
-			return
-		}
-
-		if req.Message == "" && req.MediaPath == "" {
-			http.Error(w, "Message or media path is required", http.StatusBadRequest)
-			return
-		}
-
-		fmt.Println("Received request to send message", req.Message, req.MediaPath)
-
-		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
-		fmt.Println("Message sent", success, message)
-		// Set response headers
-		w.Header().Set("Content-Type", "application/json")
-
-		// Set appropriate status code
-		if !success {
-			w.WriteHeader(http.StatusInternalServerError)
-		}
-
-		// Send response
-		json.NewEncoder(w).Encode(SendMessageResponse{
-			Success: success,
-			Message: message,
-		})
-	})
-
-	// Handler for downloading media
-	http.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
-		// Only allow POST requests
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		// Parse the request body
-		var req DownloadMediaRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request format", http.StatusBadRequest)
-			return
-		}
-
-		// Validate request
-		if req.MessageID == "" || req.ChatJID == "" {
-			http.Error(w, "Message ID and Chat JID are required", http.StatusBadRequest)
-			return
-		}
-
-		// Download the media
-		success, mediaType, filename, path, err := downloadMedia(client, messageStore, req.MessageID, req.ChatJID)
-
-		// Set response headers
-		w.Header().Set("Content-Type", "application/json")
-
-		// Handle download result
-		if !success || err != nil {
-			errMsg := "Unknown error"
-			if err != nil {
-				errMsg = err.Error()
-			}
-
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(DownloadMediaResponse{
-				Success: false,
-				Message: fmt.Sprintf("Failed to download media: %s", errMsg),
-			})
-			return
-		}
-
-		// Send successful response
-		json.NewEncoder(w).Encode(DownloadMediaResponse{
-			Success:  true,
-			Message:  fmt.Sprintf("Successfully downloaded %s media", mediaType),
-			Filename: filename,
-			Path:     path,
-		})
-	})
+	s := newAPIServer(client, messageStore)
 
 	// Start the server
 	serverAddr := fmt.Sprintf("127.0.0.1:%d", port)
@@ -140,7 +166,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 	// Run server in a goroutine so it doesn't block
 	go func() {
-		if err := http.ListenAndServe(serverAddr, nil); err != nil {
+		if err := http.ListenAndServe(serverAddr, s.handler()); err != nil {
 			fmt.Printf("REST API server error: %v\n", err)
 		}
 	}()
