@@ -174,6 +174,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer messageStore.Close()
+	messageStore.purgeDeleted = flags.purgeDeleted
 
 	// Migrations that need our JIDs and the LID map. The device store is
 	// loaded, so this works before connecting.

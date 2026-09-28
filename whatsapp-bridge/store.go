@@ -20,11 +20,14 @@ type Message struct {
 
 // Database handler for storing message history
 type MessageStore struct {
-	db         *sql.DB
-	tx         *sql.Tx    // set on the view InTx passes to its callback
-	dir        string     // store directory; downloaded media is saved under it
-	backupPath string     // backup made in this process (migration or first live merge), if any
-	backupMu   sync.Mutex // guards backupPath for live merges
+	db *sql.DB
+	tx *sql.Tx // set on the view InTx passes to its callback
+	// purgeDeleted clears the content of revoked messages (-purge-deleted);
+	// by default it is kept and the row only marked deleted (#16).
+	purgeDeleted bool
+	dir          string     // store directory; downloaded media is saved under it
+	backupPath   string     // backup made in this process (migration or first live merge), if any
+	backupMu     sync.Mutex // guards backupPath for live merges
 }
 
 // Initialize message store
@@ -124,7 +127,7 @@ func (store *MessageStore) InTx(fn func(tx *MessageStore) error) error {
 	if err != nil {
 		return err
 	}
-	view := &MessageStore{db: store.db, tx: tx, dir: store.dir}
+	view := &MessageStore{db: store.db, tx: tx, dir: store.dir, purgeDeleted: store.purgeDeleted}
 	if err := fn(view); err != nil {
 		tx.Rollback()
 		return err
@@ -215,6 +218,47 @@ func (store *MessageStore) storeMessageRow(m messageRow) error {
 		m.mediaKey, m.fileSHA256, m.fileEncSHA256, m.fileLength, m.replyTo,
 	)
 	return err
+}
+
+// senderMatchSQL matches a stored message's sender against a sender and its
+// alt (bind: sender, alt, sender).
+const senderMatchSQL = "(sender = ? OR sender = NULLIF(?, '') OR sender_alt = ?)"
+
+// ApplyEdit replaces the content of message targetID in chatJID with an
+// edit made at `at` by sender (#16). Only the author's edits apply, never to
+// a deleted message, and an edit older than the last applied one is
+// ignored. Returns whether the message was updated.
+func (store *MessageStore) ApplyEdit(chatJID, targetID, sender, senderAlt, content string, at time.Time) (bool, error) {
+	at = at.UTC()
+	res, err := store.conn().Exec(
+		`UPDATE messages SET content = ?, edited_at = ?
+		WHERE id = ? AND chat_jid = ? AND COALESCE(is_deleted, 0) = 0
+			AND (edited_at IS NULL OR edited_at <= ?)
+			AND `+senderMatchSQL,
+		content, at, targetID, chatJID, at, sender, senderAlt, sender)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// MarkDeleted marks message targetID in chatJID as deleted for everyone
+// (revoked) at `at` (#16). The content is kept unless the store was opened
+// with purgeDeleted. Only the author can revoke, unless anySender (a group,
+// where admins can delete others' messages). Returns whether a message was
+// marked.
+func (store *MessageStore) MarkDeleted(chatJID, targetID, sender, senderAlt string, anySender bool, at time.Time) (bool, error) {
+	res, err := store.conn().Exec(
+		`UPDATE messages SET is_deleted = 1, deleted_at = COALESCE(deleted_at, ?),
+			content = CASE WHEN ? THEN '' ELSE content END
+		WHERE id = ? AND chat_jid = ? AND (? OR `+senderMatchSQL+`)`,
+		at.UTC(), store.purgeDeleted, targetID, chatJID, anySender, sender, senderAlt, sender)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // StoreReaction records sender's reaction to message targetID in chatJID

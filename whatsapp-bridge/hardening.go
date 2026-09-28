@@ -16,7 +16,8 @@ var debugLogging bool
 
 // bridgeFlags are the command-line options of the bridge.
 type bridgeFlags struct {
-	debug bool
+	debug        bool
+	purgeDeleted bool
 }
 
 // parseFlags parses the bridge's command-line options.
@@ -24,6 +25,7 @@ func parseFlags(args []string) (bridgeFlags, error) {
 	fs := flag.NewFlagSet("whatsapp-bridge", flag.ContinueOnError)
 	var f bridgeFlags
 	fs.BoolVar(&f.debug, "debug", false, "log message content, chat names, outbound text and file paths (off by default)")
+	fs.BoolVar(&f.purgeDeleted, "purge-deleted", false, "clear the stored text of messages deleted for everyone (default: keep it, marked deleted)")
 	err := fs.Parse(args)
 	return f, err
 }

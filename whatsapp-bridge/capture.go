@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waWeb"
 	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
@@ -26,20 +27,51 @@ type captureTarget struct {
 
 // processed describes what processMessage did, for logging.
 type processed struct {
-	kind                         string // "message", "reaction", or "" if nothing was stored
-	stored                       bool
-	targetID                     string // for a reaction: the message reacted to
+	kind                         string // "message", "reaction", "edit", "revoke", or "" if nothing to store
+	stored                       bool   // a row was stored or updated
+	targetID                     string // for a reaction, edit or revoke: the message it applies to
 	content, mediaType, filename string
 }
 
 // processMessage stores one message (live or from history sync) under t:
 // a regular message as a messages row (with its reply context), a reaction
-// in the reactions table (#15).
+// in the reactions table (#15), an edit or revoke as an update of the
+// message it targets (#16). Other protocol messages are skipped.
 func processMessage(store *MessageStore, evt *events.Message, t captureTarget) (processed, error) {
 	var out processed
 	msg := unwrapMessage(evt.Message)
 	info := evt.Info
 	chatJID := t.chat.String()
+
+	if pm := msg.GetProtocolMessage(); pm != nil {
+		// REVOKE is the enum's zero value: require the type to be set.
+		if pm.Type == nil {
+			return out, nil
+		}
+		out.targetID = pm.GetKey().GetID()
+		if out.targetID == "" {
+			return out, nil
+		}
+		var err error
+		switch pm.GetType() {
+		case waE2E.ProtocolMessage_REVOKE:
+			out.kind = "revoke"
+			out.stored, err = store.MarkDeleted(chatJID, out.targetID, t.sender, t.senderAlt,
+				t.chat.Server == types.GroupServer, info.Timestamp)
+		case waE2E.ProtocolMessage_MESSAGE_EDIT:
+			at := info.Timestamp
+			if ms := pm.GetTimestampMS(); ms > 0 {
+				at = time.UnixMilli(ms)
+			}
+			out, err = applyEdit(store, chatJID, out.targetID, pm.GetEditedMessage(), at, t)
+		}
+		return out, err
+	}
+	// ParseWebMessage turns a history-sync edit into the new content under
+	// the original message's ID.
+	if src := evt.SourceWebMsg; src != nil && src.GetKey().GetID() != "" && src.GetKey().GetID() != info.ID {
+		return applyEdit(store, chatJID, info.ID, msg, info.Timestamp, t)
+	}
 
 	if r := msg.GetReactionMessage(); r != nil {
 		out.kind, out.targetID = "reaction", r.GetKey().GetID()
@@ -76,6 +108,17 @@ func processMessage(store *MessageStore, evt *events.Message, t captureTarget) (
 		replyTo: extractReplyTo(msg),
 	})
 	out.stored = err == nil
+	return out, err
+}
+
+// applyEdit applies an edit of message targetID to newMsg's text or caption.
+func applyEdit(store *MessageStore, chatJID, targetID string, newMsg *waE2E.Message, at time.Time, t captureTarget) (processed, error) {
+	out := processed{kind: "edit", targetID: targetID, content: extractTextContent(newMsg)}
+	if out.content == "" {
+		return out, nil
+	}
+	var err error
+	out.stored, err = store.ApplyEdit(chatJID, targetID, t.sender, t.senderAlt, out.content, at)
 	return out, err
 }
 
