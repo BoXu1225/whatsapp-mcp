@@ -1,0 +1,37 @@
+# Dependabot: GitHub Actions, the Python MCP server (uv) and the bridge's Go
+# modules other than whatsmeow. whatsmeow has no releases, only commits on
+# main (pseudo-versions), which Dependabot doesn't track; the weekly
+# "Update whatsmeow" workflow handles it instead.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+
+  - package-ecosystem: uv
+    directory: /whatsapp-mcp-server
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: gomod
+    directory: /whatsapp-bridge
+    schedule:
+      interval: weekly
+    ignore:
+      - dependency-name: go.mau.fi/whatsmeow
+    groups:
+      go:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps"
