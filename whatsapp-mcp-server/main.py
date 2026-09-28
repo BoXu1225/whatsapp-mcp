@@ -29,10 +29,11 @@ mcp = FastMCP("whatsapp")
 
 
 def _with_freshness(fn):
-    """Put a one-line bridge/data freshness header on a list tool's output (#7).
+    """Add a one-line bridge/data freshness header to a list tool's output (#7).
 
-    Text output gets it as the first line; list output as the first item.
-    The tool runs first, so its errors are raised unchanged.
+    Text output gets it as the first line. A list of chats becomes
+    {"status": <header>, "chats": [...]}. The tool runs first, so its errors
+    are raised unchanged.
     """
     returns_text = inspect.signature(fn).return_annotation is str
 
@@ -42,11 +43,11 @@ def _with_freshness(fn):
         header = status.freshness_header()
         if returns_text:
             return f"{header}\n{result}"
-        return [header, *result]
+        return {"status": header, "chats": result}
 
     if not returns_text:
-        wrapper.__signature__ = inspect.signature(fn).replace(return_annotation=List[Any])
-        wrapper.__annotations__ = {**fn.__annotations__, "return": List[Any]}
+        wrapper.__signature__ = inspect.signature(fn).replace(return_annotation=Dict[str, Any])
+        wrapper.__annotations__ = {**fn.__annotations__, "return": Dict[str, Any]}
     return wrapper
 
 
@@ -156,7 +157,7 @@ def list_chats(
 ) -> List[Dict[str, Any]]:
     """Get WhatsApp chats matching specified criteria.
 
-    The first item is a one-line bridge/data freshness header; the chats follow.
+    Returns {"status": <one-line bridge/data freshness header>, "chats": [...]}.
 
     Each chat's last message is its newest stored message (last_message, last_message_id,
     last_sender_name, last_is_from_me). Database errors are reported as tool errors.
@@ -186,7 +187,7 @@ def list_awaiting_reply(
 ) -> List[Dict[str, Any]]:
     """List chats waiting for the user's reply: the newest message is not from the user. Newest first.
 
-    The first item is a one-line bridge/data freshness header; the chats follow.
+    Returns {"status": <one-line bridge/data freshness header>, "chats": [...]}.
 
     Each result has jid, name, last_message (preview; media as [type: filename]),
     last_message_id, last_message_at, last_sender and last_sender_name.

@@ -54,7 +54,7 @@ Tested on macOS. Linux should work the same way; Windows is untested (see [Windo
    | `start` | Build if the Go sources changed, then start in the background (no-op if running). Logs to `whatsapp-bridge/bridge.log`, rotated to `bridge.log.1` over 10 MB. |
    | `stop` / `restart` | Stop / stop then start. |
    | `status` | Whether the process is running. |
-   | `health` | Ask the running bridge for `/api/health`: connected, logged in, last event, start time, version. |
+   | `health` | Ask the running bridge for `/api/health`: connected, logged in, last event, start time, version. Exits 0 only if connected and logged in. |
    | `logs` | Follow the log. |
    | `fg` | Run in the foreground, e.g. to scan a new QR code. |
 
@@ -126,7 +126,7 @@ Claude can access the following tools to interact with WhatsApp:
 - **send_audio_message**: Send an audio file as a WhatsApp voice message (requires the file to be an .ogg opus file or ffmpeg must be installed)
 - **download_media**: Download media from a WhatsApp message and get the local file path
 
-`list_messages`, `list_chats` and `list_awaiting_reply` start with a one-line header such as `[bridge up · data as of 2026-09-28T09:12:00Z]` or `[WARNING: bridge down since ~… · data as of …; newer messages are missing]`, so a stopped bridge doesn't look like a quiet inbox. For `list_messages` it is the first line of the text; for the other two, the first item of the list.
+`list_messages`, `list_chats` and `list_awaiting_reply` start with a one-line header such as `[bridge up · data as of 2026-09-28T09:12:00Z]` or `[WARNING: bridge down since ~… · data as of …; newer messages are missing]`, so a stopped bridge doesn't look like a quiet inbox. For `list_messages` it is the first line of the text; `list_chats` and `list_awaiting_reply` return `{"status": <header>, "chats": [...]}`. The header's bridge check times out after 0.5 s and is cached for 5 s; `get_status` always checks afresh with a 2 s timeout.
 
 The send tools resolve the recipient against your chats and contacts and pass the full JID to the bridge. A known contact with a direct chat is sent to that chat. A number that is a known LID is sent to its `@lid` JID, and a bare number that is both a known phone number and a known LID is rejected as ambiguous (pass the full JID). Recipients that aren't a known chat or contact are rejected unless `allow_unknown=true` is passed. The result includes `recipient_jid` and `recipient_name`. The tool descriptions tell the model to send only when you explicitly ask, after showing you the exact recipient and content.
 
@@ -153,7 +153,7 @@ If you have prompts or scripts built on the earlier tool output, note:
   - They may send to a contact's existing chat JID instead of the form you gave.
   - Results add `recipient_jid` and `recipient_name`.
 - Database errors are returned as tool errors instead of empty results or `null`.
-- `list_messages` output starts with a freshness header line; `list_chats` and `list_awaiting_reply` return that header as the first list item, before the chats.
+- `list_messages` output starts with a freshness header line. `list_chats` and `list_awaiting_reply` return `{"status": <header>, "chats": [...]}` instead of a bare list.
 
 ### Media Handling Features
 
