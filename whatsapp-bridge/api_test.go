@@ -51,7 +51,7 @@ func newTestAPIServer(t *testing.T) (*apiServer, *[]sentMessage) {
 	s.token = testToken
 	s.port = testPort
 	var sent []sentMessage
-	s.send = func(recipient, message, mediaPath string) (bool, string) {
+	s.send = func(recipient, message, mediaPath string, mediaData []byte) (bool, string) {
 		sent = append(sent, sentMessage{recipient, message, mediaPath})
 		return true, "stub sent"
 	}

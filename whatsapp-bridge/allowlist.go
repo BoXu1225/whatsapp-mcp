@@ -72,25 +72,34 @@ func resolveDir(dir string) (string, error) {
 // resolveSendPath checks that path names a regular file inside one of
 // allowedDirs once made absolute and with every symlink resolved (so ".."
 // and links pointing out of the directory are caught), and returns that
-// resolved path. The caller should read the returned path, not the input.
+// resolved path. To read the file, use openSendFile, which also guards
+// against the file being swapped after the check.
 func resolveSendPath(path string, allowedDirs []string) (string, error) {
+	real, _, err := checkSendPath(path, allowedDirs)
+	return real, err
+}
+
+// checkSendPath is resolveSendPath that also returns the Lstat of the
+// resolved path, identifying the exact file that passed the check.
+func checkSendPath(path string, allowedDirs []string) (string, os.FileInfo, error) {
 	if path == "" {
-		return "", errors.New("media_path is empty")
+		return "", nil, errors.New("media_path is empty")
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "", fmt.Errorf("invalid media_path: %w", err)
+		return "", nil, fmt.Errorf("invalid media_path: %w", err)
 	}
 	real, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return "", fmt.Errorf("media file not found: %s", path)
+		return "", nil, fmt.Errorf("media file not found: %s", path)
 	}
-	info, err := os.Stat(real)
+	// real has no symlinks left, so Lstat describes the file itself.
+	info, err := os.Lstat(real)
 	if err != nil {
-		return "", fmt.Errorf("media file not found: %s", path)
+		return "", nil, fmt.Errorf("media file not found: %s", path)
 	}
 	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("media_path is not a regular file: %s", path)
+		return "", nil, fmt.Errorf("media_path is not a regular file: %s", path)
 	}
 
 	for _, dir := range allowedDirs {
@@ -103,7 +112,7 @@ func resolveSendPath(path string, allowedDirs []string) (string, error) {
 			prefix += string(filepath.Separator)
 		}
 		if strings.HasPrefix(real, prefix) {
-			return real, nil
+			return real, info, nil
 		}
 	}
 
@@ -111,17 +120,25 @@ func resolveSendPath(path string, allowedDirs []string) (string, error) {
 	if len(allowedDirs) > 0 {
 		hint = allowedDirs[0]
 	}
-	return "", fmt.Errorf("media_path %s is outside the directories files may be sent from; copy it into %s first (or add its directory to %s)", path, hint, sendAllowedDirsEnv)
+	return "", nil, fmt.Errorf("media_path %s is outside the directories files may be sent from; copy it into %s first (or add its directory to %s)", path, hint, sendAllowedDirsEnv)
 }
 
 // sendFileOpenHook, if set, runs between the allowlist check and opening the
 // file. Tests use it to swap the file mid-check. Nil in production.
 var sendFileOpenHook func()
 
-// openSendFile checks path against allowedDirs and opens it.
-// TODO(nit): currently re-opens by path after the check (TOCTOU).
+// errSendFileChanged is returned when the file changed between the check and
+// the open.
+var errSendFileChanged = errors.New("media file changed while it was being checked; not sending it")
+
+// openSendFile checks path against allowedDirs and returns an open handle to
+// the file that passed the check, plus its resolved path. After opening it
+// fstats the handle and requires it to be a regular file and the same file
+// (os.SameFile) as the one checked, and requires the resolved path to still
+// resolve to itself and name that file. Read the media from the handle, never
+// by path again.
 func openSendFile(path string, allowedDirs []string) (*os.File, string, error) {
-	real, err := resolveSendPath(path, allowedDirs)
+	real, checked, err := checkSendPath(path, allowedDirs)
 	if err != nil {
 		return nil, "", err
 	}
@@ -130,7 +147,21 @@ func openSendFile(path string, allowedDirs []string) (*os.File, string, error) {
 	}
 	f, err := os.Open(real)
 	if err != nil {
-		return nil, "", err
+		return nil, "", fmt.Errorf("open media file: %w", err)
+	}
+	opened, err := f.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(opened, checked) {
+		f.Close()
+		return nil, "", errSendFileChanged
+	}
+	again, err := filepath.EvalSymlinks(real)
+	if err != nil || again != real {
+		f.Close()
+		return nil, "", errSendFileChanged
+	}
+	if now, err := os.Lstat(real); err != nil || !os.SameFile(now, opened) {
+		f.Close()
+		return nil, "", errSendFileChanged
 	}
 	return f, real, nil
 }

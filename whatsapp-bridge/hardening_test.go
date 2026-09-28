@@ -164,7 +164,7 @@ func TestAPISendDoesNotLogContentAtInfo(t *testing.T) {
 
 	s, _ := newTestAPIServer(t)
 	s.allowedDirs = []string{outbox}
-	s.send = func(recipient, message, mediaPath string) (bool, string) {
+	s.send = func(recipient, message, mediaPath string, mediaData []byte) (bool, string) {
 		return true, "Message sent to " + recipient
 	}
 	out := captureStdout(t, func() {

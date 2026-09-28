@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"go.mau.fi/whatsmeow"
@@ -13,7 +12,9 @@ import (
 )
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string) (bool, string) {
+// mediaPath names the media (for its type and document title); mediaData is
+// its content, already read by the caller from the allowlist-checked handle.
+func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string, mediaData []byte) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
@@ -43,12 +44,6 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 
 	// Check if we have media to send
 	if mediaPath != "" {
-		// Read media file
-		mediaData, err := os.ReadFile(mediaPath)
-		if err != nil {
-			return false, fmt.Sprintf("Error reading media file: %v", err)
-		}
-
 		// Determine media type and mime type based on file extension
 		fileExt := strings.ToLower(mediaPath[strings.LastIndex(mediaPath, ".")+1:])
 		var mediaType whatsmeow.MediaType
