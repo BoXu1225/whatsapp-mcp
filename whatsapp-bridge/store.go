@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -20,8 +21,9 @@ type Message struct {
 // Database handler for storing message history
 type MessageStore struct {
 	db         *sql.DB
-	dir        string // store directory; downloaded media is saved under it
-	backupPath string // backup made before this process's first migration, if any
+	dir        string     // store directory; downloaded media is saved under it
+	backupPath string     // backup made in this process (migration or first live merge), if any
+	backupMu   sync.Mutex // guards backupPath for live merges
 }
 
 // Initialize message store
@@ -126,6 +128,8 @@ func (store *MessageStore) StoreMessageWithAlt(id, chatJID, sender, senderAlt, c
 
 // MergeChat moves chat `from` into chat `to` (see mergeChatTx) if `from`
 // exists. Used when a phone-number chat turns out to belong to a LID chat.
+// Like the startup migrations, the first merge of a run backs the database up
+// first (unless this run already made a backup); if that fails, nothing is merged.
 func (store *MessageStore) MergeChat(from, to string) error {
 	if from == to || from == "" {
 		return nil
@@ -136,6 +140,9 @@ func (store *MessageStore) MergeChat(from, to string) error {
 			return nil
 		}
 		return err
+	}
+	if err := store.ensureBackup(); err != nil {
+		return fmt.Errorf("not merged: failed to back up messages.db first: %v", err)
 	}
 	tx, err := store.db.Begin()
 	if err != nil {
@@ -217,4 +224,25 @@ func (store *MessageStore) GetMediaInfo(id, chatJID string) (string, string, str
 	).Scan(&mediaType, &filename, &url, &mediaKey, &fileSHA256, &fileEncSHA256, &fileLength)
 
 	return mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, err
+}
+
+// ensureBackup makes a backup (see backup in migrate.go) unless this run
+// already has one.
+func (store *MessageStore) ensureBackup() error {
+	store.backupMu.Lock()
+	defer store.backupMu.Unlock()
+	if store.backupPath != "" {
+		return nil
+	}
+	version, err := store.schemaVersion()
+	if err != nil {
+		return err
+	}
+	path, err := store.backup(version)
+	if err != nil {
+		return err
+	}
+	store.backupPath = path
+	fmt.Printf("Merging a phone-number chat into its LID chat; backup of messages.db saved to %s\n", path)
+	return nil
 }
