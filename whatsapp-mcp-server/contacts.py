@@ -6,11 +6,16 @@ whichever form WhatsApp delivered, and senders sometimes as a bare user part
 with no server. A LID is not a phone number: sending to ``<lid>@s.whatsapp.net``
 reaches nobody (or the wrong person).
 
-``Directory`` joins three sources, read once per call:
+``Directory`` joins these sources, read once per call:
 
 - whatsmeow_lid_map (lid, pn) from the whatsmeow device store (whatsapp.db);
 - whatsmeow_contacts (their_jid, full_name, first_name, business_name, push_name);
-- the bridge's chats table.
+- the bridge's chats table;
+- (sender, sender_alt) pairs from messages, where the bridge recorded both
+  forms of a sender (schema version 2 and later). They add to the LID map.
+
+Newer bridges store senders as full JIDs (``user@server``) and key 1:1 chats
+by LID where known; rows from older bridges may hold bare users. Both are read.
 
 The device store is optional. Without it, only the chats table is used and a
 bare number is treated as a LID only when a ``<number>@lid`` chat exists.
@@ -118,6 +123,24 @@ class Recipient:
     is_group: bool = False
 
 
+def _sender_alt_pairs(messages_conn: sqlite3.Connection) -> List[Tuple[str, str]]:
+    """(lid, pn) user pairs from messages.sender / sender_alt; [] on older schemas."""
+    columns = {row[1] for row in messages_conn.execute("PRAGMA table_info(messages)")}
+    if "sender_alt" not in columns:
+        return []
+    pairs = []
+    rows = messages_conn.execute(
+        "SELECT DISTINCT sender, sender_alt FROM messages WHERE sender_alt IS NOT NULL AND sender_alt != ''"
+    )
+    for sender, alt in rows:
+        (user_a, server_a), (user_b, server_b) = split_jid(sender), split_jid(alt)
+        if server_a == LID_SERVER and server_b == PN_SERVER:
+            pairs.append((user_a, user_b))
+        elif server_a == PN_SERVER and server_b == LID_SERVER:
+            pairs.append((user_b, user_a))
+    return pairs
+
+
 class Directory:
     def __init__(
         self,
@@ -186,7 +209,7 @@ class Directory:
             "SELECT jid, name FROM chats ORDER BY last_message_time DESC"
         ).fetchall()
 
-        lid_map: List[Tuple[str, str]] = []
+        lid_map: List[Tuple[str, str]] = _sender_alt_pairs(messages_conn)
         contacts: List[dict] = []
         available = False
         if whatsmeow_db_path and os.path.isfile(whatsmeow_db_path):
@@ -194,7 +217,7 @@ class Directory:
                 uri = Path(whatsmeow_db_path).resolve().as_uri() + "?mode=ro"
                 conn = sqlite3.connect(uri, uri=True)
                 try:
-                    lid_map = conn.execute("SELECT lid, pn FROM whatsmeow_lid_map").fetchall()
+                    lid_map = lid_map + conn.execute("SELECT lid, pn FROM whatsmeow_lid_map").fetchall()
                     conn.row_factory = sqlite3.Row
                     contacts = [
                         dict(row)
@@ -206,7 +229,7 @@ class Directory:
                 finally:
                     conn.close()
             except sqlite3.Error:
-                lid_map, contacts = [], []
+                lid_map, contacts = _sender_alt_pairs(messages_conn), []
         return cls(lid_map, contacts, chats, device_store_available=available)
 
     # --- identity ----------------------------------------------------------
