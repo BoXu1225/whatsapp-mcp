@@ -61,11 +61,16 @@ func truncateFilename(name string, max int) string {
 }
 
 // chatDirName turns a chat JID into a single directory name ("@" and "." are
-// kept, ":" becomes "_") and rejects anything that isn't one plain element.
+// kept, ":" becomes "_") and rejects anything that isn't one plain element of
+// the form user@server. Requiring the "@" keeps chat dirs from ever
+// coinciding with the store's own entries (outbox, bridge_token, *.db).
 func chatDirName(chatJID string) (string, error) {
 	name := strings.ReplaceAll(chatJID, ":", "_")
+	at := strings.Index(name, "@")
 	switch {
-	case name == "", name == ".", name == "..":
+	case at <= 0, at == len(name)-1:
+		return "", fmt.Errorf("invalid chat JID %q", chatJID)
+	case name == outboxDirName, name == bridgeTokenFile:
 		return "", fmt.Errorf("invalid chat JID %q", chatJID)
 	case strings.ContainsAny(name, `/\`), strings.ContainsRune(name, 0):
 		return "", fmt.Errorf("invalid chat JID %q", chatJID)
