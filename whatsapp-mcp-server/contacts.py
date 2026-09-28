@@ -324,5 +324,15 @@ class Directory:
             raise ValueError(
                 f"'{value}' is not a phone number or JID. Use search_contacts to find the contact's JID."
             )
+        if server is None and self._is_lid(user) and user in self._known_phones:
+            # The same digits are someone's phone number and (maybe someone else's) LID.
+            candidates = []
+            for jid in (f"{user}@{PN_SERVER}", f"{user}@{LID_SERVER}"):
+                candidate = self.person(jid)
+                candidates.append(f"{jid} ({(candidate.name if candidate else None) or 'unknown name'})")
+            raise ValueError(
+                f"'{value}' is ambiguous: it is both a phone number and a LID. Candidates: "
+                f"{' and '.join(candidates)}. Pass the full JID of the intended recipient."
+            )
         person = self.person(value)
         return Recipient(jid=ident.jid, name=person.name if person else None, known=person is not None)
